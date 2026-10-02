@@ -4116,3 +4116,59 @@ def unroll_reduce(k, rng):
 
     return out.map_exprs(simplify)
 
+# Step 25 - optimize_gemm
+# ── Step 025  optimize_gemm ──
+import time
+
+
+def optimize_gemm(k, tm=4, tn=4, tk=4):
+    # Split M into outer and inner tiles.
+    m = k.out_ranges[0]
+    k, m_outer, m_inner = split_range(k, m, tm)
+
+    # After splitting M, out_ranges is [m_outer, m_inner, N].
+    n = k.out_ranges[2]
+    k, n_outer, n_inner = split_range(k, n, tn)
+
+    # Reorder the output loops to the GEMM micro-tile order.
+    k = reorder(
+        k,
+        [m_outer, n_outer, m_inner, n_inner],
+    )
+
+    # Unroll the micro-tile dimensions.
+    k = unroll_output(k, n_inner)
+    k = unroll_output(k, m_inner)
+
+    # Split and unroll the inner K loop when requested.
+    if tk > 1:
+        red = k.body[0]
+        assert len(red.ranges) == 1
+
+        kr = red.ranges[0]
+        k, k_outer, k_inner = split_range(k, kr, tk)
+        k = unroll_reduce(k, k_inner)
+
+    return k
+
+
+def bench_kernel(k, bufs, reps=3):
+    lib = compile_c(render_kernel(k))
+
+    # Warm up once.
+    call_kernel(lib, k.name, bufs)
+
+    best = float("inf")
+
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        call_kernel(lib, k.name, bufs)
+        elapsed = time.perf_counter() - t0
+        best = min(best, elapsed)
+
+    return best
+
+
+def gflops(n, seconds):
+    return 2 * n**3 / seconds / 1e9
+

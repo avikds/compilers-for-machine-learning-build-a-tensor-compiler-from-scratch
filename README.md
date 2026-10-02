@@ -34,6 +34,7 @@ python scaffold.py
 - [x] **22.** split_range
 - [x] **23.** unroll_output
 - [x] **24.** unroll_reduce
+- [x] **25.** optimize_gemm
 
 ---
 
