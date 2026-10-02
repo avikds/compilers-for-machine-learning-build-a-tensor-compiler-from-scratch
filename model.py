@@ -2615,75 +2615,48 @@ def eval_tensor(u, bufs, cache=None):
 
 # Step 14 - conv2d
 def conv2d(x, w, pad=0):
-    """
-    Implement stride-1 2D convolution using movement ops and one reduction.
-
-    x: (N, Cin, H, W)
-    w: (Cout, Cin, kh, kw)
-
-    Returns:
-        (N, Cout, Ho, Wo)
-    """
-    assert isinstance(x, Tensor)
-    assert isinstance(w, Tensor)
-
-    assert len(x.shape) == 4
-    assert len(w.shape) == 4
-
     N, Cin, H, W = x.shape
-    Cout, w_Cin, kh, kw = w.shape
+    Cout, wCin, kh, kw = w.shape
 
-    assert Cin == w_Cin
-
-    pad = int(pad)
+    assert Cin == wCin
     assert pad >= 0
 
-    # Output spatial dimensions for stride 1.
+    # Output spatial dimensions for stride-1 convolution.
     Ho = H + 2 * pad - kh + 1
     Wo = W + 2 * pad - kw + 1
 
-    assert Ho >= 0
-    assert Wo >= 0
+    assert Ho > 0 and Wo > 0
 
-    # Pad only the two spatial dimensions:
-    # (N, Cin, H, W) -> (N, Cin, H + 2p, W + 2p)
-    px = x.pad((
+    # Pad the input spatial dimensions.
+    xp = x.pad((
         (0, 0),
         (0, 0),
         (pad, pad),
         (pad, pad),
     ))
 
-    products = []
+    acc = None
 
-    # Build one movement-based product for every kernel tap.
     for dh in range(kh):
         for dw in range(kw):
-            # Select the sliding window corresponding to this tap:
-            # (N, Cin, H + 2p, W + 2p)
-            # -> (N, Cin, Ho, Wo)
-            window = px.shrink((
+            # Select the output-sized window for this tap.
+            window = xp.shrink((
                 (0, N),
                 (0, Cin),
                 (dh, dh + Ho),
                 (dw, dw + Wo),
             ))
 
-            # Make input-channel position explicit:
             # (N, Cin, Ho, Wo)
             # -> (N, 1, Cin, Ho, Wo)
+            # -> (N, Cout, Cin, Ho, Wo)
             window = window.reshape(
                 (N, 1, Cin, Ho, Wo)
-            )
-
-            # Broadcast over output channels.
-            window = window.expand(
+            ).expand(
                 (N, Cout, Cin, Ho, Wo)
             )
 
-            # Select one kernel tap:
-            # (Cout, Cin, kh, kw)
-            # -> (Cout, Cin, 1, 1)
+            # Select one spatial tap from the weights.
             tap = w.shrink((
                 (0, Cout),
                 (0, Cin),
@@ -2691,30 +2664,20 @@ def conv2d(x, w, pad=0):
                 (dw, dw + 1),
             ))
 
-            # Remove the singleton kernel spatial dimensions, then add
-            # singleton batch/output spatial dimensions.
+            # (Cout, Cin, 1, 1)
+            # -> (1, Cout, Cin, 1, 1)
+            # -> (N, Cout, Cin, Ho, Wo)
             tap = tap.reshape(
                 (1, Cout, Cin, 1, 1)
-            )
-
-            # Broadcast across batch, input-channel reduction positions,
-            # and output spatial positions.
-            tap = tap.expand(
+            ).expand(
                 (N, Cout, Cin, Ho, Wo)
             )
 
-            products.append(window * tap)
+            term = window * tap
+            acc = term if acc is None else acc + term
 
-    # Sum all kernel taps before the single input-channel reduction.
-    assert products
-
-    result = products[0]
-
-    for product in products[1:]:
-        result = result + product
-
-    # Reduce the input-channel dimension only.
-    return result.sum(2)
+    # Reduce only over the input-channel dimension.
+    return acc.sum(2)
 
 
 Tensor.conv2d = conv2d
