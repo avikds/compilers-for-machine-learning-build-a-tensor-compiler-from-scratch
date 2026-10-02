@@ -33,6 +33,7 @@ python scaffold.py
 - [x] **21.** Compiled
 - [x] **22.** split_range
 - [x] **23.** unroll_output
+- [x] **24.** unroll_reduce
 
 ---
 

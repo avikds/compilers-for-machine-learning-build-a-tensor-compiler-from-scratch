@@ -4011,3 +4011,108 @@ def unroll_output(k, rng):
     # Simplify all generated expressions.
     return out.map_exprs(simplify)
 
+# Step 24 - unroll_reduce
+def unroll_reduce(k, rng):
+    assert rng.op is Ops.RANGE
+
+    target = None
+
+    # Find the reduction containing rng, including nested reductions.
+    def find_reduce(r):
+        nonlocal target
+
+        if rng in r.ranges:
+            target = r
+            return
+
+        for stmt in r.body:
+            find_reduce(stmt)
+            if target is not None:
+                return
+
+    for red in k.body:
+        find_reduce(red)
+        if target is not None:
+            break
+
+    assert target is not None
+
+    U = rng.src[0].arg
+
+    # Nested reductions must not depend on the range being unrolled.
+    def check_nested(r):
+        for stmt in r.body:
+            assert rng not in reduce_exprs(stmt)
+            check_nested(stmt)
+
+    for stmt in target.body:
+        check_nested(stmt)
+
+    # Build a new update chain for every accumulator.
+    new_accs = []
+
+    for acc, init, update in target.accs:
+        current = acc
+
+        for j in range(U):
+            mapping = {
+                rng: UOp.const(
+                    dtypes.int32,
+                    j,
+                ),
+                acc: current,
+            }
+
+            current = substitute(
+                update,
+                mapping,
+            )
+
+        new_accs.append([
+            acc,
+            init,
+            current,
+        ])
+
+    # Remove the unrolled reduction range.
+    new_ranges = tuple(
+        r
+        for r in target.ranges
+        if r is not rng
+    )
+
+    new_target = Reduce(
+        new_ranges,
+        new_accs,
+        target.body,
+    )
+
+    # Rebuild the kernel, replacing the target reduction recursively.
+    def replace_reduce(r):
+        if r is target:
+            return new_target
+
+        return Reduce(
+            r.ranges,
+            r.accs,
+            [
+                replace_reduce(stmt)
+                for stmt in r.body
+            ],
+        )
+
+    new_body = [
+        replace_reduce(red)
+        for red in k.body
+    ]
+
+    out = Kernel(
+        k.name,
+        k.params,
+        k.out_ranges,
+        new_body,
+        k.stores,
+    )
+
+    return out.map_exprs(simplify)
+
