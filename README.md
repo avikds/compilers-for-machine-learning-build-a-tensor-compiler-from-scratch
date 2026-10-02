@@ -42,6 +42,7 @@ python scaffold.py
 - [x] **30.** grad_movement
 - [x] **31.** backward
 - [x] **32.** gpt_forward
+- [x] **33.** build_train_program
 
 ---
 

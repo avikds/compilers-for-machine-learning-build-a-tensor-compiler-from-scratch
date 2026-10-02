@@ -4912,3 +4912,71 @@ def gpt_forward(onehot, mask, p):
 
     return x.layernorm() @ p["wout"]
 
+# Step 33 - build_train_program
+def cross_entropy(logits, targets):
+    B, T, V = logits.shape
+
+    return -(
+        logits.logsoftmax(-1) * targets
+    ).sum() * (1.0 / (B * T))
+
+
+def build_train_program(B, T, V, d, lr):
+    x = Tensor.input(
+        "x",
+        (B, T, V),
+    )
+
+    y = Tensor.input(
+        "y",
+        (B, T, V),
+    )
+
+    mask = Tensor.input(
+        "mask",
+        (T, T),
+    )
+
+    # Get the parameter shapes from gpt_init.
+    shapes = {
+        name: value.shape
+        for name, value in gpt_init(
+            V,
+            T,
+            d,
+            np.random.default_rng(0),
+        ).items()
+    }
+
+    p = {
+        name: Tensor.input(name, shape)
+        for name, shape in shapes.items()
+    }
+
+    logits = gpt_forward(
+        x,
+        mask,
+        p,
+    )
+
+    loss = cross_entropy(
+        logits,
+        y,
+    )
+
+    grads = backward(
+        loss,
+        list(p.values()),
+    )
+
+    outputs = {
+        "loss": loss,
+    }
+
+    for name, tensor in p.items():
+        outputs[name + "_new"] = (
+            tensor - grads[tensor] * lr
+        )
+
+    return schedule(outputs)
+
