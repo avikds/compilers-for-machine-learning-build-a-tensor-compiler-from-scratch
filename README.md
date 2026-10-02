@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** exec_alu
 - [x] **6.** fold_div
 - [x] **7.** make_symbolic
+- [x] **8.** render_sink
 
 ---
 
