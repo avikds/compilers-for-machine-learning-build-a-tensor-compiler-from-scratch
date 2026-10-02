@@ -2616,3 +2616,182 @@ class Tensor:
             var + eps
         ).sqrt()
 
+# Step 13 - eval_tensor
+def eval_tensor(u, bufs, cache=None):
+    """
+    Evaluate a tensor-level UOp graph using NumPy reference semantics.
+
+    `bufs` maps buffer names to NumPy-compatible arrays. Buffer inputs are
+    converted to their declared dtype and reshaped to their declared shape.
+
+    Results are converted to the UOp's NumPy dtype and memoized in `cache`.
+    """
+    if cache is None:
+        cache = {}
+
+    if u in cache:
+        return cache[u]
+
+    with np.errstate(all="ignore"):
+        # --------------------------------------------------------------
+        # Leaves
+        # --------------------------------------------------------------
+
+        if u.op is Ops.CONST:
+            result = np.array(u.arg, dtype=u.dtype.np)
+
+        elif u.op is Ops.BUFFER:
+            name, shape = u.arg
+            result = np.asarray(
+                bufs[name],
+                dtype=u.dtype.np,
+            ).reshape(shape)
+
+        # --------------------------------------------------------------
+        # Movement operations
+        # --------------------------------------------------------------
+
+        elif u.op is Ops.RESHAPE:
+            x = eval_tensor(u.src[0], bufs, cache)
+            result = x.reshape(u.arg)
+
+        elif u.op is Ops.EXPAND:
+            x = eval_tensor(u.src[0], bufs, cache)
+            result = np.broadcast_to(x, u.arg)
+
+        elif u.op is Ops.PERMUTE:
+            x = eval_tensor(u.src[0], bufs, cache)
+            result = np.transpose(x, u.arg)
+
+        elif u.op is Ops.FLIP:
+            x = eval_tensor(u.src[0], bufs, cache)
+            result = np.flip(x, axis=u.arg)
+
+        elif u.op is Ops.PAD:
+            x = eval_tensor(u.src[0], bufs, cache)
+            pad_width = u.arg
+            result = np.pad(
+                x,
+                pad_width,
+                mode="constant",
+                constant_values=0,
+            )
+
+        elif u.op is Ops.SHRINK:
+            x = eval_tensor(u.src[0], bufs, cache)
+
+            slices = tuple(
+                slice(b, e)
+                for b, e in u.arg
+            )
+
+            result = x[slices]
+
+        # --------------------------------------------------------------
+        # Reduction
+        # --------------------------------------------------------------
+
+        elif u.op is Ops.REDUCE_AXIS:
+            x = eval_tensor(u.src[0], bufs, cache)
+            op, axes = u.arg
+
+            if op is Ops.ADD:
+                result = np.sum(
+                    x,
+                    axis=axes,
+                    keepdims=True,
+                )
+
+            elif op is Ops.MAX:
+                result = np.max(
+                    x,
+                    axis=axes,
+                    keepdims=True,
+                )
+
+            else:
+                raise NotImplementedError(
+                    f"Unsupported reduction op: {op}"
+                )
+
+        # --------------------------------------------------------------
+        # Elementwise ALU
+        # --------------------------------------------------------------
+
+        elif u.op in ALU:
+            vals = tuple(
+                eval_tensor(src, bufs, cache)
+                for src in u.src
+            )
+
+            if u.op is Ops.ADD:
+                result = vals[0] + vals[1]
+
+            elif u.op is Ops.MUL:
+                result = vals[0] * vals[1]
+
+            elif u.op is Ops.MAX:
+                result = np.maximum(
+                    vals[0],
+                    vals[1],
+                )
+
+            elif u.op is Ops.CMPLT:
+                result = vals[0] < vals[1]
+
+            elif u.op is Ops.AND:
+                result = vals[0] & vals[1]
+
+            elif u.op is Ops.IDIV:
+                result = np.floor_divide(
+                    vals[0],
+                    vals[1],
+                )
+
+            elif u.op is Ops.MOD:
+                result = np.mod(
+                    vals[0],
+                    vals[1],
+                )
+
+            elif u.op is Ops.RECIP:
+                result = np.reciprocal(vals[0])
+
+            elif u.op is Ops.EXP2:
+                result = np.exp2(vals[0])
+
+            elif u.op is Ops.LOG2:
+                result = np.log2(vals[0])
+
+            elif u.op is Ops.SQRT:
+                result = np.sqrt(vals[0])
+
+            elif u.op is Ops.CAST:
+                result = vals[0].astype(u.dtype.np)
+
+            elif u.op is Ops.WHERE:
+                result = np.where(
+                    vals[0],
+                    vals[1],
+                    vals[2],
+                )
+
+            else:
+                raise NotImplementedError(
+                    f"Unsupported ALU op: {u.op}"
+                )
+
+        else:
+            raise NotImplementedError(
+                f"Unsupported UOp in eval_tensor: {u.op}"
+            )
+
+    # Force every result to the dtype declared by the UOp.
+    result = np.asarray(
+        result,
+        dtype=u.dtype.np,
+    )
+
+    cache[u] = result
+    return result
+
