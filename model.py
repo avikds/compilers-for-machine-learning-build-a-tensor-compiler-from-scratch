@@ -4376,3 +4376,123 @@ def launch_dims(k, block=(32, 4, 1)):
 
     return grid, actual_block
 
+# Step 28 - render_cuda
+def render_cuda(k):
+    renderer = CRenderer()
+
+    args = []
+
+    for p in k.params:
+        if p.arg[1] == 0:
+            args.append(
+                f"{p.dtype.c_name}* data0"
+            )
+        else:
+            args.append(
+                f"const {p.dtype.c_name}* data{p.arg[1]}"
+            )
+
+    renderer.lines.append(
+        f"__global__ void {k.name}({', '.join(args)}) {{"
+    )
+
+    renderer.push()
+
+    # Map CUDA block/thread coordinates to the SPECIAL nodes.
+    for s in k.out_ranges:
+        dim = int(s.arg[1][4:])
+        axis = ("x", "y", "z")[dim]
+
+        renderer.emit(
+            f"int {s.arg[1]} = blockIdx.{axis} * "
+            f"blockDim.{axis} + threadIdx.{axis};"
+        )
+
+    # The grid may contain extra threads, so guard every output extent.
+    cond = " && ".join(
+        f"{r.arg[1]} < {r.src[0].arg}"
+        for r in k.out_ranges
+    )
+
+    renderer.emit(f"if ({cond}) {{")
+    renderer.push()
+
+    def render_reduce(r):
+        for acc, init, update in r.accs:
+            renderer.emit(
+                f"{acc.dtype.c_name} acc{acc.arg} = "
+                f"{renderer.expr(init)};"
+            )
+
+        for rr in r.ranges:
+            n = rr.src[0].arg
+
+            renderer.emit(
+                f"for (int r{rr.arg} = 0; "
+                f"r{rr.arg} < {n}; "
+                f"r{rr.arg}++) {{"
+            )
+            renderer.push()
+
+        for stmt in r.body:
+            render_reduce(stmt)
+
+        for acc, init, update in r.accs:
+            renderer.emit(
+                f"acc{acc.arg} = {renderer.expr(update)};"
+            )
+
+        for _ in r.ranges:
+            renderer.pop()
+            renderer.emit("}")
+
+    for r in k.body:
+        render_reduce(r)
+
+    for index, value in k.stores:
+        renderer.emit(
+            f"data0[{renderer.expr(index)}] = "
+            f"{renderer.expr(value)};"
+        )
+
+    renderer.pop()
+    renderer.emit("}")
+
+    renderer.pop()
+    renderer.lines.append("}")
+
+    return "\n".join(renderer.lines) + "\n"
+
+
+def cuda_source(k, block=(32, 4, 1)):
+    grid, block = launch_dims(k, block)
+
+    args = []
+
+    for p in k.params:
+        if p.arg[1] == 0:
+            args.append(
+                f"{p.dtype.c_name}* data0"
+            )
+        else:
+            args.append(
+                f"const {p.dtype.c_name}* data{p.arg[1]}"
+            )
+
+    call_args = ", ".join(
+        f"data{p.arg[1]}"
+        for p in k.params
+    )
+
+    launcher = (
+        f"\nextern \"C\" void launch_{k.name}"
+        f"({', '.join(args)}) {{\n"
+        f"  dim3 grid({grid[0]}, {grid[1]}, {grid[2]}), "
+        f"block({block[0]}, {block[1]}, {block[2]});\n"
+        f"  {k.name}<<<grid, block>>>({call_args});\n"
+        f"  cudaDeviceSynchronize();\n"
+        f"}}\n"
+    )
+
+    return render_cuda(k) + launcher
+
