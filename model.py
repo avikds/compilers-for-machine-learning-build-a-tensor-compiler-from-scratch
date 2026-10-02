@@ -4497,7 +4497,6 @@ def cuda_source(k, block=(32, 4, 1)):
     return render_cuda(k) + launcher
 
 # Step 29 - grad_alu
-# ── Step 029  grad_alu ──
 def grad_alu(u, g):
     T = Tensor
     out = T(u)
