@@ -4826,3 +4826,89 @@ def backward(loss, params):
         for p in params
     }
 
+# Step 32 - gpt_forward
+def gpt_init(V, T, d, rng, scale=0.3):
+    def init(rows, cols, extra=1.0):
+        return (
+            rng.standard_normal((rows, cols)).astype(np.float32)
+            * (scale / math.sqrt(rows))
+            * extra
+        )
+
+    return {
+        "wte": init(V, d),
+        "wpe": init(T, d, 0.1),
+        "wq": init(d, d),
+        "wk": init(d, d),
+        "wv": init(d, d),
+        "wo": init(d, d),
+        "w1": init(d, 4 * d),
+        "w2": init(4 * d, d),
+        "wout": init(d, V),
+    }
+
+
+def causal_mask(T):
+    out = np.zeros((T, T), dtype=np.float32)
+
+    for i in range(T):
+        for j in range(i + 1, T):
+            out[i, j] = -1e9
+
+    return out
+
+
+def make_batch(B, T, V, rng):
+    starts = rng.integers(0, V, size=B)
+
+    x = np.zeros((B, T, V), dtype=np.float32)
+    y = np.zeros((B, T, V), dtype=np.float32)
+
+    for b in range(B):
+        seq = (starts[b] + 3 * np.arange(T + 1)) % V
+
+        x[b, np.arange(T), seq[:T]] = 1.0
+        y[b, np.arange(T), seq[1:]] = 1.0
+
+    return x, y
+
+
+def gpt_forward(onehot, mask, p):
+    B, T, V = onehot.shape
+    d = p["wte"].shape[1]
+
+    # Token embedding + positional embedding.
+    x = onehot @ p["wte"] + p["wpe"]
+
+    # Attention block.
+    h = x.layernorm()
+
+    q = h @ p["wq"]
+    k = h @ p["wk"]
+    v = h @ p["wv"]
+
+    scores = (
+        q.reshape(B, T, 1, d)
+        * k.reshape(B, 1, T, d)
+    ).sum(3)
+
+    scores = (
+        scores * (1.0 / math.sqrt(d))
+        + mask
+    )
+
+    pr = scores.softmax(-1)
+
+    y = (
+        pr.reshape(B, T, T, 1)
+        * v.reshape(B, 1, T, d)
+    ).sum(2)
+
+    x = x + y @ p["wo"]
+
+    # MLP block.
+    h = x.layernorm()
+    x = x + (h @ p["w1"]).relu() @ p["w2"]
+
+    return x.layernorm() @ p["wout"]
+

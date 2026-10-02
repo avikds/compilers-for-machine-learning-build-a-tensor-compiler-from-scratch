@@ -41,6 +41,7 @@ python scaffold.py
 - [x] **29.** grad_alu
 - [x] **30.** grad_movement
 - [x] **31.** backward
+- [x] **32.** gpt_forward
 
 ---
 
