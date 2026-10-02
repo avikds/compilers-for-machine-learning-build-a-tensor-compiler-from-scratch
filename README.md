@@ -36,6 +36,7 @@ python scaffold.py
 - [x] **24.** unroll_reduce
 - [x] **25.** optimize_gemm
 - [x] **26.** flash_attention_kernel
+- [x] **27.** to_gpu
 
 ---
 

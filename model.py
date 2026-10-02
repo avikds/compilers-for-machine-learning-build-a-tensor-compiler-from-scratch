@@ -4303,3 +4303,76 @@ def flash_attention_kernel(N, d, name="flash"):
         stores,
     )
 
+# Step 27 - to_gpu
+def special(n, i, name):
+    return UOp(
+        Ops.SPECIAL,
+        dtypes.int32,
+        (
+            UOp.const(
+                dtypes.int32,
+                n,
+            ),
+        ),
+        (i, name),
+    )
+
+
+def to_gpu(k):
+    assert 1 <= len(k.out_ranges) <= 3
+
+    mapping = {}
+    specials = []
+
+    # The last output axis maps to x, then y, then z.
+    for axis in range(len(k.out_ranges)):
+        r = k.out_ranges[axis]
+        n = r.src[0].arg
+
+        dim = len(k.out_ranges) - 1 - axis
+        s = special(
+            n,
+            r.arg,
+            f"gidx{dim}",
+        )
+
+        mapping[r] = s
+        specials.append(s)
+
+    nk = k.map_exprs(
+        lambda u: substitute(u, mapping)
+    )
+
+    nk.out_ranges = specials
+
+    return nk
+
+
+def launch_dims(k, block=(32, 4, 1)):
+    assert 1 <= len(k.out_ranges) <= 3
+    assert len(block) == 3
+
+    extents = [
+        1,
+        1,
+        1,
+    ]
+
+    # Convert output ranges from tensor order to x/y/z order.
+    for axis, r in enumerate(k.out_ranges):
+        dim = len(k.out_ranges) - 1 - axis
+        extents[dim] = r.src[0].arg
+
+    actual_block = tuple(
+        min(int(block[i]), extents[i])
+        for i in range(3)
+    )
+
+    grid = tuple(
+        (extents[i] + actual_block[i] - 1)
+        // actual_block[i]
+        for i in range(3)
+    )
+
+    return grid, actual_block
+
