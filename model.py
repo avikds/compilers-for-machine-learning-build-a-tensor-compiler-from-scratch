@@ -508,3 +508,57 @@ class PatternMatcher:
 
         return None
 
+# Step 4 - graph_rewrite
+def graph_rewrite(root, pm):
+    """
+    Rewrite a UOp graph bottom-up to a fixed point.
+
+    Each original node is memoized so shared subgraphs are rewritten only once.
+    Newly created replacement nodes are also recursively rewritten when they
+    have sources.
+    """
+    memo = {}
+
+    def rw(u):
+        if u in memo:
+            return memo[u]
+
+        # Rewrite all sources first.
+        new_src = tuple(rw(src) for src in u.src)
+
+        # Rebuild only when at least one source changed.
+        current = u if new_src == u.src else UOp(u.op, u.dtype, new_src, u.arg)
+
+        # Repeatedly apply rewrite rules until reaching a fixed point.
+        for _ in range(1000):
+            r = pm.rewrite(current)
+
+            # No rule applies.
+            if r is None:
+                break
+
+            # A rewrite that maps the node back to itself is already a fixed
+            # point, so stop.
+            if r is current:
+                break
+
+            # A replacement may contain sources that have not yet been
+            # rewritten. Run the same bottom-up rewrite on them.
+            if r.src:
+                r_rewritten = rw(r)
+            else:
+                r_rewritten = r
+
+            # Stop if processing the replacement leads back to the current
+            # node.
+            if r_rewritten is current:
+                break
+
+            current = r_rewritten
+
+        # Memoize the original node, not just the rewritten node.
+        memo[u] = current
+        return current
+
+    return rw(root)
+
