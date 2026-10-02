@@ -3232,3 +3232,190 @@ def lower_kernel(root, inputs, name="k"):
     # Simplify all generated kernel expressions.
     return kernel.map_exprs(simplify)
 
+# Step 18 - run_kernel_np
+def run_kernel_np(k, bufs):
+    # Build the output grid. Output ranges are represented by int64
+    # index arrays so the interpreter can vectorize over all outputs.
+    shape = tuple(
+        r.src[0].arg
+        if r.op in {Ops.RANGE, Ops.SPECIAL}
+        else 1
+        for r in k.out_ranges
+    )
+
+    grids = np.indices(
+        shape,
+        dtype=np.int64,
+    )
+
+    env = {}
+    cache = {}
+
+    # Bind output ranges and SPECIAL nodes to their grid index arrays.
+    for i, r in enumerate(k.out_ranges):
+        if r.op in {Ops.RANGE, Ops.SPECIAL}:
+            env[r] = grids[i]
+
+    def ev(u):
+        if u in cache:
+            return cache[u]
+
+        if u.op is Ops.CONST:
+            dtype = (
+                np.int64
+                if u.dtype is dtypes.int32
+                else u.dtype.np
+            )
+            out = np.array(u.arg, dtype=dtype)
+
+        elif u.op in {Ops.RANGE, Ops.SPECIAL}:
+            out = env[u]
+
+        elif u.op is Ops.DEFINE_ACC:
+            out = env[u]
+
+        elif u.op is Ops.LOAD:
+            # LOAD -> INDEX -> (PARAM, index)
+            index = u.src[0]
+            p = index.src[0]
+
+            idx = ev(index.src[1])
+            flat = bufs[p.arg[1]].reshape(-1)
+
+            # Clip gathers so masked PAD loads never go out of bounds.
+            idx = np.clip(
+                idx,
+                0,
+                flat.size - 1,
+            ).astype(np.intp)
+
+            out = flat[idx]
+
+        elif u.op is Ops.WHERE:
+            out = np.where(
+                ev(u.src[0]),
+                ev(u.src[1]),
+                ev(u.src[2]),
+            )
+
+        elif u.op is Ops.CAST:
+            out = ev(u.src[0]).astype(u.dtype.np)
+
+        elif u.op is Ops.ADD:
+            out = ev(u.src[0]) + ev(u.src[1])
+
+        elif u.op is Ops.MUL:
+            out = ev(u.src[0]) * ev(u.src[1])
+
+        elif u.op is Ops.MAX:
+            out = np.maximum(
+                ev(u.src[0]),
+                ev(u.src[1]),
+            )
+
+        elif u.op is Ops.CMPLT:
+            out = ev(u.src[0]) < ev(u.src[1])
+
+        elif u.op is Ops.AND:
+            out = ev(u.src[0]) & ev(u.src[1])
+
+        elif u.op is Ops.IDIV:
+            with np.errstate(all="ignore"):
+                out = np.floor_divide(
+                    ev(u.src[0]),
+                    ev(u.src[1]),
+                )
+
+        elif u.op is Ops.MOD:
+            with np.errstate(all="ignore"):
+                out = np.mod(
+                    ev(u.src[0]),
+                    ev(u.src[1]),
+                )
+
+        elif u.op is Ops.RECIP:
+            with np.errstate(all="ignore"):
+                out = np.reciprocal(ev(u.src[0]))
+
+        elif u.op is Ops.EXP2:
+            with np.errstate(all="ignore"):
+                out = np.exp2(ev(u.src[0]))
+
+        elif u.op is Ops.LOG2:
+            with np.errstate(all="ignore"):
+                out = np.log2(ev(u.src[0]))
+
+        elif u.op is Ops.SQRT:
+            with np.errstate(all="ignore"):
+                out = np.sqrt(ev(u.src[0]))
+
+        else:
+            raise NotImplementedError(u.op)
+
+        # Keep every expression in the dtype declared by its UOp.
+        out = np.asarray(out, dtype=u.dtype.np)
+        cache[u] = out
+        return out
+
+    def run_reduce(r):
+        # Each accumulator starts as its init value broadcast over
+        # the complete output grid.
+        for acc, init, _ in r.accs:
+            env[acc] = np.array(
+                np.broadcast_to(
+                    ev(init),
+                    shape,
+                ),
+                dtype=acc.dtype.np,
+                copy=True,
+            )
+
+        for values in np.ndindex(*(
+            rg.src[0].arg
+            for rg in r.ranges
+        )):
+            # Reduction ranges are scalar loop variables.
+            for rg, value in zip(r.ranges, values):
+                env[rg] = value
+
+            cache.clear()
+
+            # Nested reductions execute before the accumulator updates.
+            for stmt in r.body:
+                run_reduce(stmt)
+
+            # Evaluate every update against the previous accumulator
+            # values before assigning any new values.
+            updates = [
+                ev(update)
+                for _, _, update in r.accs
+            ]
+
+            for (acc, _, _), value in zip(
+                r.accs,
+                updates,
+            ):
+                env[acc] = np.asarray(
+                    value,
+                    dtype=acc.dtype.np,
+                )
+
+        cache.clear()
+
+    # Execute top-level reductions.
+    for r in k.body:
+        run_reduce(r)
+
+    # Scatter each computed store into the output buffer.
+    out = bufs[0].reshape(-1)
+
+    for index, value in k.stores:
+        idx = ev(index)
+        val = ev(value)
+
+        out[
+            np.asarray(idx).astype(np.intp)
+        ] = val
+
+    return bufs[0]
+
