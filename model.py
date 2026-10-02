@@ -264,3 +264,143 @@ class UOp:
 
         return result
 
+# Step 2 - bounds
+import functools
+
+
+@functools.lru_cache(maxsize=None)
+def bounds(u):
+    """
+    Return (vmin, vmax) for integer and boolean expressions.
+
+    Boolean values are represented numerically as 0 or 1.
+    Floating-point expressions and unknown operations are unbounded.
+    """
+    # Floating-point values and unknown dtypes have no useful bounds.
+    if u.dtype not in (dtypes.int32, dtypes.bool):
+        return -INF, INF
+
+    # Constants.
+    if u.op is Ops.CONST:
+        if u.dtype is dtypes.bool:
+            v = int(bool(u.arg))
+            return v, v
+        return u.arg, u.arg
+
+    # Range-like indices are always [0, n - 1].
+    if u.op in (Ops.RANGE, Ops.SPECIAL):
+        n = u.src[0].arg
+        return 0, n - 1
+
+    # Addition.
+    if u.op is Ops.ADD:
+        a0, a1 = bounds(u.src[0])
+        b0, b1 = bounds(u.src[1])
+        return a0 + b0, a1 + b1
+
+    # Multiplication.
+    if u.op is Ops.MUL:
+        a0, a1 = bounds(u.src[0])
+        b0, b1 = bounds(u.src[1])
+
+        products = []
+        for a in (a0, a1):
+            for b in (b0, b1):
+                # Skip 0 * inf, which would otherwise become NaN.
+                if (a == 0 and math.isinf(b)) or (b == 0 and math.isinf(a)):
+                    continue
+                products.append(a * b)
+
+        if not products:
+            return 0, 0
+
+        return min(products), max(products)
+
+    # Maximum.
+    if u.op is Ops.MAX:
+        a0, a1 = bounds(u.src[0])
+        b0, b1 = bounds(u.src[1])
+        return max(a0, b0), max(a1, b1)
+
+    # Integer floor division by a positive constant.
+    if u.op is Ops.IDIV:
+        a0, a1 = bounds(u.src[0])
+        c = u.src[1].arg
+
+        if not isinstance(c, (int, np.integer)) or c <= 0:
+            return -INF, INF
+
+        vmin = -INF if a0 == -INF else math.floor(a0 / c)
+        vmax = INF if a1 == INF else math.floor(a1 / c)
+
+        return vmin, vmax
+
+    # Modulo by a positive constant.
+    if u.op is Ops.MOD:
+        a0, a1 = bounds(u.src[0])
+        c = u.src[1].arg
+
+        if not isinstance(c, (int, np.integer)) or c <= 0:
+            return -INF, INF
+
+        # Already inside [0, c - 1], so modulo does not change the interval.
+        if 0 <= a0 and a1 < c:
+            return a0, a1
+
+        return 0, c - 1
+
+    # Less-than comparison.
+    if u.op is Ops.CMPLT:
+        a0, a1 = bounds(u.src[0])
+        b0, b1 = bounds(u.src[1])
+
+        if a1 < b0:
+            return 1, 1
+
+        if a0 >= b1:
+            return 0, 0
+
+        return 0, 1
+
+    # Logical AND.
+    if u.op is Ops.AND:
+        a0, a1 = bounds(u.src[0])
+        b0, b1 = bounds(u.src[1])
+
+        if a0 == 1 and b0 == 1:
+            return 1, 1
+
+        if a1 == 0 or b1 == 0:
+            return 0, 0
+
+        return 0, 1
+
+    # Conditional expression.
+    if u.op is Ops.WHERE:
+        c0, c1 = bounds(u.src[0])
+
+        # Condition is definitely true.
+        if c0 == 1 and c1 == 1:
+            return bounds(u.src[1])
+
+        # Condition is definitely false.
+        if c0 == 0 and c1 == 0:
+            return bounds(u.src[2])
+
+        # Unknown condition: union the two branch intervals.
+        a0, a1 = bounds(u.src[1])
+        b0, b1 = bounds(u.src[2])
+        return min(a0, b0), max(a1, b1)
+
+    # Casting preserves bounds when casting an integer/bool expression.
+    if u.op is Ops.CAST:
+        src = u.src[0]
+
+        if src.dtype in (dtypes.int32, dtypes.bool):
+            return bounds(src)
+
+        return -INF, INF
+
+    # All other operations are currently unknown to the bounds analysis.
+    return -INF, INF
+
