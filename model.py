@@ -3419,3 +3419,88 @@ def run_kernel_np(k, bufs):
 
     return bufs[0]
 
+# Step 19 - render_kernel
+def render_kernel(k):
+    r = CRenderer()
+
+    # Render the function signature first, outside the renderer's scopes.
+    r.lines.append(
+        signature(
+            k.name,
+            k.params,
+            {k.params[0]},
+        ) + " {"
+    )
+
+    # Enter the function body.
+    r.push()
+
+    def open_loops(ranges):
+        for rg in ranges:
+            if rg.op is Ops.RANGE:
+                r.emit(
+                    f"for (int r{rg.arg} = 0; "
+                    f"r{rg.arg} < {rg.src[0].arg}; "
+                    f"r{rg.arg}++) {{"
+                )
+                r.push()
+
+    def close_loops(ranges):
+        for rg in reversed(ranges):
+            if rg.op is Ops.RANGE:
+                r.pop()
+                r.emit("}")
+
+    def render_reduce(red):
+        # Initialize every accumulator before entering the reduction loops.
+        for acc, init, update in red.accs:
+            r.emit(
+                f"{acc.dtype.c_name} acc{acc.arg} = {r.expr(init)};"
+            )
+
+        open_loops(red.ranges)
+
+        # Nested reductions are rendered inside the current reduction.
+        for stmt in red.body:
+            render_reduce(stmt)
+
+        # expr(update) already creates and caches a temporary for the
+        # update expression. Evaluate every update before assigning any
+        # accumulator so all updates see the previous accumulator values.
+        updates = [
+            (acc, r.expr(update))
+            for acc, _, update in red.accs
+        ]
+
+        for acc, value in updates:
+            r.emit(f"acc{acc.arg} = {value};")
+
+        close_loops(red.ranges)
+
+    # Open the output loop nest.
+    open_loops(k.out_ranges)
+
+    # Render all reduction statements.
+    for red in k.body:
+        render_reduce(red)
+
+    # Write the output values.
+    for index, value in k.stores:
+        r.emit(
+            f"data0[{r.expr(index)}] = {r.expr(value)};"
+        )
+
+    close_loops(k.out_ranges)
+
+    r.pop()
+    r.lines.append("}")
+
+    return "\n".join(r.lines) + "\n"
+
+
+def run_kernel_c(k, bufs):
+    src = render_kernel(k)
+    lib = compile_c(src)
+    call_kernel(lib, k.name, bufs)
+    return bufs[0]
+

@@ -28,6 +28,7 @@ python scaffold.py
 - [x] **16.** Lowerer
 - [x] **17.** ReduceLowerer
 - [x] **18.** run_kernel_np
+- [x] **19.** render_kernel
 
 ---
 
