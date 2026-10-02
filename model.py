@@ -3109,3 +3109,126 @@ def lower_kernel(root, inputs, name="k"):
     # Simplify all generated expressions.
     return kernel.map_exprs(simplify)
 
+# Step 17 - ReduceLowerer
+def reduce_exprs(r):
+    # Collect all RANGE dependencies from accumulator expressions
+    # and recursively from nested reductions.
+    ranges = set()
+
+    for _, init, update in r.accs:
+        ranges |= ranges_in(init)
+        ranges |= ranges_in(update)
+
+    for stmt in r.body:
+        ranges |= reduce_exprs(stmt)
+
+    return ranges
+
+
+class ReduceLowerer(Lowerer):
+    def index(self, u, idxs, root):
+        # Realized reductions are handled by Lowerer as normal loads.
+        if (
+            u.op is not Ops.REDUCE_AXIS
+            or (u is not root and u in self.realized)
+        ):
+            return super().index(u, idxs, root)
+
+        op, axes = u.arg
+        src = u.src[0]
+        src_shape = shape_of(src)
+
+        # Create one fresh loop range for every reduced axis.
+        new_ranges = tuple(
+            self.new_range(src_shape[axis])
+            for axis in axes
+        )
+
+        # Replace each reduced axis with its new reduction range.
+        src_idxs = list(idxs)
+        for axis, r in zip(axes, new_ranges):
+            src_idxs[axis] = r
+
+        # The reduction scope contains both the enclosing ranges
+        # and the newly created reduction ranges.
+        enclosing = self.frames[-1][0]
+        self.frames.append([
+            enclosing | set(new_ranges),
+            [],
+        ])
+
+        val = self.index(
+            src,
+            tuple(src_idxs),
+            root,
+        )
+
+        body = self.frames.pop()[1]
+
+        acc = self.new_acc(u.dtype)
+
+        if op is Ops.ADD:
+            init = UOp.const(u.dtype, 0.0)
+            update = acc + val
+        elif op is Ops.MAX:
+            init = UOp.const(u.dtype, -INF)
+            update = acc.maximum(val)
+        else:
+            raise NotImplementedError(op)
+
+        statement = Reduce(
+            new_ranges,
+            [[acc, init, update]],
+            body,
+        )
+
+        # Find the outermost scope containing every range dependency.
+        deps = reduce_exprs(statement) - set(new_ranges)
+
+        target = None
+        for frame in self.frames:
+            if deps <= frame[0]:
+                target = frame
+                break
+
+        # If no enclosing scope contains all dependencies, use the
+        # innermost frame.
+        if target is None:
+            target = self.frames[-1]
+
+        target[1].append(statement)
+
+        self.memo[(u, tuple(idxs))] = acc
+        return acc
+
+
+def lower_kernel(root, inputs, name="k"):
+    # Parameter 0 is always the output.
+    out = param(
+        "out",
+        root.dtype,
+        0,
+    )
+
+    realized = {}
+    params = [out]
+
+    # Inputs become realized parameters in insertion order.
+    for i, (u, buf_name) in enumerate(inputs.items()):
+        p = param(
+            buf_name,
+            u.dtype,
+            i + 1,
+        )
+        realized[u] = p
+        params.append(p)
+
+    lowerer = ReduceLowerer(realized)
+    kernel = lowerer.lower(root)
+
+    kernel.name = name
+    kernel.params = params
+
+    # Simplify all generated kernel expressions.
+    return kernel.map_exprs(simplify)
+

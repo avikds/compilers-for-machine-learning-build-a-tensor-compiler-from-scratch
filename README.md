@@ -26,6 +26,7 @@ python scaffold.py
 - [x] **14.** conv2d
 - [x] **15.** Kernel
 - [x] **16.** Lowerer
+- [x] **17.** ReduceLowerer
 
 ---
 
