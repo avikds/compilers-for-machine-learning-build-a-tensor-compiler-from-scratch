@@ -29,6 +29,7 @@ python scaffold.py
 - [x] **17.** ReduceLowerer
 - [x] **18.** run_kernel_np
 - [x] **19.** render_kernel
+- [x] **20.** schedule
 
 ---
 

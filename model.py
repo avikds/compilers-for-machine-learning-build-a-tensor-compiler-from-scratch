@@ -3504,3 +3504,117 @@ def run_kernel_c(k, bufs):
     call_kernel(lib, k.name, bufs)
     return bufs[0]
 
+# Step 20 - schedule
+class Program:
+    def __init__(self):
+        self.buffers, self.kernels = {}, []
+
+
+def schedule(outputs):
+    prog = Program()
+
+    # Collect every node once, preserving first-seen topological order.
+    nodes = []
+    seen = set()
+
+    for tensor in outputs.values():
+        for u in tensor.uop.toposort():
+            if u not in seen:
+                seen.add(u)
+                nodes.append(u)
+
+    realized = {}
+    inputs = set()
+
+    # Realize every BUFFER as an external input.
+    for u in nodes:
+        if u.op is Ops.BUFFER:
+            name = u.arg[0]
+            realized[u] = name
+            inputs.add(u)
+
+            prog.buffers[name] = (
+                shape_of(u),
+                u.dtype,
+                "input",
+            )
+
+    # Every REDUCE_AXIS that is not already an input/output becomes a stage.
+    # Do this before outputs so stage buffers appear before output buffers.
+    stage = 0
+
+    for u in nodes:
+        if u.op is Ops.REDUCE_AXIS and u not in realized:
+            name = f"stage{stage}"
+            stage += 1
+
+            realized[u] = name
+
+            prog.buffers[name] = (
+                shape_of(u),
+                u.dtype,
+                "stage",
+            )
+
+    # Realize output roots under their requested names.
+    for name, tensor in outputs.items():
+        u = tensor.uop
+
+        realized[u] = name
+
+        prog.buffers[name] = (
+            shape_of(u),
+            u.dtype,
+            "output",
+        )
+
+    # Lower each realized node that is not an input.
+    kernel_index = 0
+
+    for u in nodes:
+        if u not in realized or u in inputs:
+            continue
+
+        # Gather realized dependencies in first-seen order.
+        deps = []
+
+        for v in u.toposort():
+            if v is u:
+                continue
+
+            if v in realized and v not in deps:
+                deps.append(v)
+
+        ins = {
+            v: realized[v]
+            for v in deps
+        }
+
+        kernel = lower_kernel(
+            u,
+            ins,
+            name=f"k{kernel_index}",
+        )
+
+        # Size-one output axes are already represented by CONST 0
+        # in the lowered indices, so only real loops belong here.
+        kernel.out_ranges = [
+            r
+            for r in kernel.out_ranges
+            if r.op is Ops.RANGE
+        ]
+
+        prog.kernels.append(
+            (
+                kernel,
+                [realized[u]] + [
+                    realized[v]
+                    for v in deps
+                ],
+            )
+        )
+
+        kernel_index += 1
+
+    return prog
+
