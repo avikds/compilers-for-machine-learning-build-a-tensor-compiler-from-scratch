@@ -3618,3 +3618,124 @@ def schedule(outputs):
 
     return prog
 
+# Step 21 - Compiled
+class Compiled:
+    def __init__(self, prog):
+        self.prog = prog
+        self.unique = 0
+        self.names = []
+        self.kernels = []
+
+        sources = []
+        source_names = {}
+
+        # Render every kernel with the placeholder name K so identical
+        # kernel sources can share one compiled function.
+        for kernel, buf_names in prog.kernels:
+            src = render_kernel(kernel)
+
+            src = src.replace(
+                f"void {kernel.name}(",
+                "void K(",
+                1,
+            )
+
+            if src not in source_names:
+                source_names[src] = f"k{self.unique}"
+                sources.append(src)
+                self.unique += 1
+
+            self.names.append(source_names[src])
+
+            self.kernels.append(
+                (
+                    kernel,
+                    buf_names,
+                    source_names[src],
+                )
+            )
+
+        # Give each unique source its final exported function name.
+        combined = []
+
+        for src in sources:
+            final_name = source_names[src]
+
+            combined.append(
+                src.replace(
+                    "void K(",
+                    f"void {final_name}(",
+                    1,
+                )
+            )
+
+        # Compile all unique kernels into one shared object.
+        self.lib = compile_c("\n".join(combined))
+
+    def run(self, inputs):
+        bufs = {}
+
+        # Allocate all program buffers.
+        for name, (shape, dtype, kind) in self.prog.buffers.items():
+            if kind == "input":
+                bufs[name] = np.ascontiguousarray(
+                    inputs[name],
+                    dtype=dtype.np,
+                ).reshape(shape)
+            else:
+                bufs[name] = np.zeros(
+                    shape,
+                    dtype=dtype.np,
+                )
+
+        # Execute kernels in schedule order.
+        for _, buf_names, kernel_name in self.kernels:
+            call_kernel(
+                self.lib,
+                kernel_name,
+                [
+                    bufs[name]
+                    for name in buf_names
+                ],
+            )
+
+        # Return only the requested outputs.
+        return {
+            name: bufs[name]
+            for name, (_, _, kind) in self.prog.buffers.items()
+            if kind == "output"
+        }
+
+
+def run_program_np(prog, inputs):
+    bufs = {}
+
+    # Match the compiled runtime's allocation semantics.
+    for name, (shape, dtype, kind) in prog.buffers.items():
+        if kind == "input":
+            bufs[name] = np.ascontiguousarray(
+                inputs[name],
+                dtype=dtype.np,
+            ).reshape(shape)
+        else:
+            bufs[name] = np.zeros(
+                shape,
+                dtype=dtype.np,
+            )
+
+    # Run the scheduled kernels through the NumPy interpreter.
+    for kernel, buf_names in prog.kernels:
+        run_kernel_np(
+            kernel,
+            [
+                bufs[name]
+                for name in buf_names
+            ],
+        )
+
+    return {
+        name: bufs[name]
+        for name, (_, _, kind) in prog.buffers.items()
+        if kind == "output"
+    }
+
