@@ -12,6 +12,7 @@ python scaffold.py
 
 - [x] **1.** UOp
 - [x] **2.** bounds
+- [x] **3.** UPat
 
 ---
 

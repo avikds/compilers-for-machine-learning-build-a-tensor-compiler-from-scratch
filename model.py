@@ -403,3 +403,109 @@ def bounds(u):
     # All other operations are currently unknown to the bounds analysis.
     return -INF, INF
 
+# Step 3 - UPat
+_MISSING = object()
+
+
+class UPat:
+    def __init__(self, op=None, dtype=None, src=None, arg=_MISSING, name=None):
+        self.op = op
+        self.dtype = dtype
+        self.src = src
+        self.arg = arg
+        self.name = name
+
+    @staticmethod
+    def var(name=None, dtype=None):
+        return UPat(dtype=dtype, name=name)
+
+    @staticmethod
+    def cvar(name=None, dtype=None):
+        return UPat(Ops.CONST, name=name, dtype=dtype)
+
+    def match(self, u, store):
+        """
+        Match this pattern against u.
+
+        On success, bindings are written into store.
+        Repeated names must refer to the exact same UOp object.
+        """
+        original = dict(store)
+
+        # Operation constraint.
+        if self.op is not None:
+            if isinstance(self.op, set):
+                if u.op not in self.op:
+                    store.clear()
+                    store.update(original)
+                    return False
+            elif u.op is not self.op:
+                store.clear()
+                store.update(original)
+                return False
+
+        # DType constraint.
+        if self.dtype is not None and u.dtype is not self.dtype:
+            store.clear()
+            store.update(original)
+            return False
+
+        # Argument constraint.
+        if self.arg is not _MISSING and u.arg != self.arg:
+            store.clear()
+            store.update(original)
+            return False
+
+        # Bind the node by name.
+        if self.name is not None:
+            if self.name in store:
+                if store[self.name] is not u:
+                    store.clear()
+                    store.update(original)
+                    return False
+            else:
+                store[self.name] = u
+
+        # Source constraint.
+        if self.src is not None:
+            if len(u.src) != len(self.src):
+                store.clear()
+                store.update(original)
+                return False
+
+            for pat, src in zip(self.src, u.src):
+                if not pat.match(src, store):
+                    store.clear()
+                    store.update(original)
+                    return False
+
+        return True
+
+
+class PatternMatcher:
+    def __init__(self, patterns):
+        self.patterns = list(patterns)
+
+    def __add__(self, other):
+        return PatternMatcher(self.patterns + other.patterns)
+
+    def rewrite(self, u):
+        """
+        Try each rewrite rule in order.
+
+        A rule applies only when its pattern matches and its function returns
+        a replacement that is neither None nor the original UOp.
+        """
+        for pattern, fn in self.patterns:
+            store = {}
+
+            if not pattern.match(u, store):
+                continue
+
+            result = fn(**store)
+
+            if result is not None and result is not u:
+                return result
+
+        return None
+
