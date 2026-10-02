@@ -3884,3 +3884,130 @@ def split_range(k, rng, size):
 
     return nk, outer, inner
 
+# Step 23 - unroll_output
+def reorder(k, order):
+    order = list(order)
+
+    # The new order must be a permutation of the existing output ranges.
+    assert len(order) == len(k.out_ranges)
+    assert set(order) == set(k.out_ranges)
+
+    return Kernel(
+        k.name,
+        k.params,
+        order,
+        k.body,
+        k.stores,
+    )
+
+
+def unroll_output(k, rng):
+    assert rng in k.out_ranges
+    assert rng.op is Ops.RANGE
+
+    U = rng.src[0].arg
+    assert U >= 1
+
+    # No nested reduction may depend on the output range being unrolled.
+    def check_nested(r):
+        for expr in reduce_exprs(r):
+            if expr is rng:
+                return False
+        return True
+
+    for red in k.body:
+        for nested in red.body:
+            assert check_nested(nested)
+
+    nextid = next_id(k)
+
+    # For each copy j, rng becomes CONST(j). Accumulators that depend
+    # on rng get their own accumulator for that copy.
+    replica_maps = [dict() for _ in range(U)]
+
+    for red in k.body:
+        for acc, init, update in red.accs:
+            if rng not in ranges_in(init) and rng not in ranges_in(update):
+                continue
+
+            for j in range(U):
+                replica_maps[j][acc] = UOp(
+                    Ops.DEFINE_ACC,
+                    acc.dtype,
+                    (),
+                    nextid,
+                )
+                nextid += 1
+
+    new_body = []
+
+    for red in k.body:
+        accs = []
+
+        for acc, init, update in red.accs:
+            # Accumulators independent of rng remain shared.
+            if not any(
+                acc in mapping
+                for mapping in replica_maps
+            ):
+                accs.append([acc, init, update])
+                continue
+
+            # Replicate the accumulator for each unrolled output value.
+            for j in range(U):
+                mapping = dict(replica_maps[j])
+                mapping[rng] = UOp.const(
+                    dtypes.int32,
+                    j,
+                )
+
+                accs.append([
+                    replica_maps[j][acc],
+                    substitute(init, mapping),
+                    substitute(update, mapping),
+                ])
+
+        # Nested reductions are unchanged because they were asserted not
+        # to depend on rng.
+        new_body.append(
+            Reduce(
+                red.ranges,
+                accs,
+                red.body,
+            )
+        )
+
+    # Replicate every store in j order.
+    stores = []
+
+    for index, value in k.stores:
+        for j in range(U):
+            mapping = dict(replica_maps[j])
+            mapping[rng] = UOp.const(
+                dtypes.int32,
+                j,
+            )
+
+            stores.append((
+                substitute(index, mapping),
+                substitute(value, mapping),
+            ))
+
+    # Remove the unrolled range from the output loop list.
+    out_ranges = [
+        r
+        for r in k.out_ranges
+        if r is not rng
+    ]
+
+    out = Kernel(
+        k.name,
+        k.params,
+        out_ranges,
+        new_body,
+        stores,
+    )
+
+    # Simplify all generated expressions.
+    return out.map_exprs(simplify)
+
