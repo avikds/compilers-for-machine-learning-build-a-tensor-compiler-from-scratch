@@ -1548,3 +1548,70 @@ def render_sink(s, name="kernel"):
     # rendered function a complete text block when printed.
     return "\n".join(renderer.lines) + "\n"
 
+# Step 9 - eval_sink
+def eval_sink(s, bufs):
+    """
+    Interpret a loopless SINK graph using NumPy arrays.
+
+    The buffers in `bufs` are modified in place and the same dictionary
+    is returned.
+    """
+    if s.op is not Ops.SINK:
+        raise ValueError("eval_sink expects a SINK UOp")
+
+    memo = {}
+
+    def eval_uop(u):
+        if u in memo:
+            return memo[u]
+
+        if u.op is Ops.CONST:
+            value = u.arg
+
+        elif u.op is Ops.PARAM:
+            # PARAM arguments are (name, position).
+            value = u.arg[0]
+
+        elif u.op is Ops.LOAD:
+            # LOAD -> INDEX -> (PARAM, index)
+            index = u.src[0]
+            p = index.src[0]
+            idx = eval_uop(index.src[1])
+
+            # Flatten the NumPy buffer and extract a native Python scalar.
+            value = bufs[p.arg[0]].reshape(-1)[int(idx)].item()
+
+        elif u.op in ALU:
+            vals = tuple(eval_uop(src) for src in u.src)
+            value = exec_alu(u.op, u.dtype, vals).arg
+
+        elif u.op is Ops.INDEX:
+            # INDEX itself represents a buffer access descriptor. It is
+            # normally consumed by LOAD or STORE.
+            p = u.src[0]
+            idx = eval_uop(u.src[1])
+            value = (p, idx)
+
+        else:
+            raise NotImplementedError(
+                f"Unsupported UOp in eval_sink: {u.op}"
+            )
+
+        memo[u] = value
+        return value
+
+    for st in s.src:
+        if st.op is not Ops.STORE:
+            raise ValueError("SINK contains a non-STORE source")
+
+        index = st.src[0]
+        value = st.src[1]
+
+        p = index.src[0]
+        idx = eval_uop(index.src[1])
+        val = eval_uop(value)
+
+        bufs[p.arg[0]].reshape(-1)[int(idx)] = val
+
+    return bufs
+

@@ -18,6 +18,7 @@ python scaffold.py
 - [x] **6.** fold_div
 - [x] **7.** make_symbolic
 - [x] **8.** render_sink
+- [x] **9.** eval_sink
 
 ---
 
