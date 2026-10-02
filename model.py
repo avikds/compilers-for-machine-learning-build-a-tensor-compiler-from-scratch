@@ -4980,3 +4980,73 @@ def build_train_program(B, T, V, d, lr):
 
     return schedule(outputs)
 
+# Step 34 - train_gpt
+def train_gpt(B=4, T=8, V=16, d=16, steps=40, lr=0.5, seed=0):
+    rng = np.random.default_rng(seed)
+
+    # Build and compile the fixed-shape training program once.
+    t0 = time.perf_counter()
+    prog = build_train_program(
+        B,
+        T,
+        V,
+        d,
+        lr,
+    )
+    compiled = Compiled(prog)
+    compile_s = time.perf_counter() - t0
+
+    # Initialize model parameters after compilation so the RNG sequence
+    # matches the specified training setup.
+    params = gpt_init(
+        V,
+        T,
+        d,
+        rng,
+    )
+
+    mask = causal_mask(T)
+    losses = []
+    step_times = []
+
+    for _ in range(steps):
+        x, y = make_batch(
+            B,
+            T,
+            V,
+            rng,
+        )
+
+        inputs = {
+            "x": x,
+            "y": y,
+            "mask": mask,
+        }
+        inputs.update(params)
+
+        t0 = time.perf_counter()
+        result = compiled.run(inputs)
+        step_times.append(
+            time.perf_counter() - t0
+        )
+
+        losses.append(
+            float(np.asarray(result["loss"]).reshape(()))
+        )
+
+        params = {
+            name: result[name + "_new"]
+            for name in params
+        }
+
+    return {
+        "losses": losses,
+        "kernels": len(prog.kernels),
+        "unique": compiled.unique,
+        "compile_s": compile_s,
+        "step_ms": 1000.0 * sum(step_times) / len(step_times)
+        if step_times
+        else 0.0,
+        "params": params,
+    }
+
