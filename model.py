@@ -562,3 +562,349 @@ def graph_rewrite(root, pm):
 
     return rw(root)
 
+# Step 5 - exec_alu
+def exec_alu(op, dtype, vals):
+    """
+    Evaluate an ALU operation on Python scalar values and return a UOp
+    constant with the requested dtype.
+    """
+    if op is Ops.ADD:
+        result = vals[0] + vals[1]
+
+    elif op is Ops.MUL:
+        result = vals[0] * vals[1]
+
+    elif op is Ops.MAX:
+        result = max(vals[0], vals[1])
+
+    elif op is Ops.CMPLT:
+        result = vals[0] < vals[1]
+
+    elif op is Ops.AND:
+        result = bool(vals[0]) and bool(vals[1])
+
+    elif op is Ops.IDIV:
+        # The compiler defines division by zero as zero.
+        result = 0 if vals[1] == 0 else vals[0] // vals[1]
+
+    elif op is Ops.MOD:
+        # The compiler defines modulo by zero as zero.
+        result = 0 if vals[1] == 0 else vals[0] % vals[1]
+
+    elif op is Ops.RECIP:
+        x = vals[0]
+
+        if x == 0:
+            # Preserve the sign of zero for a signed infinity.
+            result = math.copysign(INF, float(x))
+        else:
+            result = 1 / x
+
+    elif op is Ops.EXP2:
+        x = vals[0]
+
+        # Explicit compiler overflow boundary.
+        if x >= 128:
+            result = INF
+        else:
+            try:
+                result = 2 ** x
+            except OverflowError:
+                result = INF
+
+    elif op is Ops.LOG2:
+        x = vals[0]
+
+        if x == 0:
+            result = -INF
+        elif x < 0:
+            result = float("nan")
+        else:
+            result = math.log2(x)
+
+    elif op is Ops.SQRT:
+        x = vals[0]
+
+        if x < 0:
+            result = float("nan")
+        else:
+            result = math.sqrt(x)
+
+    elif op is Ops.CAST:
+        result = vals[0]
+
+    elif op is Ops.WHERE:
+        result = vals[1] if vals[0] else vals[2]
+
+    else:
+        raise NotImplementedError(f"Unsupported ALU operation: {op}")
+
+    return UOp.const(dtype, result)
+
+
+def basic_rules():
+    """
+    Return the basic simplification and canonicalization rules.
+
+    Rule order is significant: earlier rules have priority over later rules.
+    """
+    return PatternMatcher([
+        # ---------------------------------------------------------------
+        # Constant folding
+        # ---------------------------------------------------------------
+
+        # Unary ALU operations with a constant source.
+        (
+            UPat(ALU, src=(UPat.cvar("c"),), name="u"),
+            lambda u, c: exec_alu(u.op, u.dtype, (c.arg,)),
+        ),
+
+        # Binary ALU operations with two constant sources.
+        (
+            UPat(BINARY, src=(UPat.cvar("a"), UPat.cvar("b")), name="u"),
+            lambda u, a, b: exec_alu(u.op, u.dtype, (a.arg, b.arg)),
+        ),
+
+        # ---------------------------------------------------------------
+        # WHERE simplification
+        # ---------------------------------------------------------------
+
+        # Constant condition: select the appropriate branch.
+        (
+            UPat(
+                Ops.WHERE,
+                src=(
+                    UPat.cvar("c"),
+                    UPat.var("a"),
+                    UPat.var("b"),
+                ),
+            ),
+            lambda c, a, b: a if bool(c.arg) else b,
+        ),
+
+        # Identical branches always give the same value.
+        (
+            UPat(
+                Ops.WHERE,
+                src=(
+                    UPat.var("c"),
+                    UPat.var("a"),
+                    UPat.var("a"),
+                ),
+            ),
+            lambda c, a: a,
+        ),
+
+        # ---------------------------------------------------------------
+        # Commutative canonicalization
+        # ---------------------------------------------------------------
+
+        # Move a constant left operand to the right.
+        (
+            UPat(
+                {Ops.ADD, Ops.MUL, Ops.MAX, Ops.AND},
+                src=(
+                    UPat.cvar("c"),
+                    UPat.var("x"),
+                ),
+                name="u",
+            ),
+            lambda u, c, x: (
+                None
+                if x.op is Ops.CONST
+                else UOp(u.op, u.dtype, (x, c))
+            ),
+        ),
+
+        # ---------------------------------------------------------------
+        # Algebraic identities
+        # ---------------------------------------------------------------
+
+        # x + 0 -> x
+        (
+            UPat(
+                Ops.ADD,
+                src=(UPat.var("x"), UPat.cvar("c")),
+            ),
+            lambda x, c: x if c.arg == 0 else None,
+        ),
+
+        # x * 1 -> x
+        # x * 0 -> 0
+        (
+            UPat(
+                Ops.MUL,
+                src=(UPat.var("x"), UPat.cvar("c")),
+            ),
+            lambda x, c: (
+                x if c.arg == 1
+                else c if c.arg == 0
+                else None
+            ),
+        ),
+
+        # x // 1 -> x
+        (
+            UPat(
+                Ops.IDIV,
+                src=(UPat.var("x"), UPat.cvar("c")),
+            ),
+            lambda x, c: x if c.arg == 1 else None,
+        ),
+
+        # x % 1 -> 0
+        (
+            UPat(
+                Ops.MOD,
+                src=(UPat.var("x"), UPat.cvar("c")),
+            ),
+            lambda x, c: (
+                UOp.const(x.dtype, 0)
+                if c.arg == 1
+                else None
+            ),
+        ),
+
+        # x & True -> x
+        # x & False -> False
+        (
+            UPat(
+                Ops.AND,
+                src=(UPat.var("x"), UPat.cvar("c")),
+            ),
+            lambda x, c: (
+                x
+                if bool(c.arg)
+                else UOp.const(dtypes.bool, False)
+            ),
+        ),
+
+        # max(x, x) -> x
+        (
+            UPat(
+                Ops.MAX,
+                src=(UPat.var("x"), UPat.var("x")),
+            ),
+            lambda x: x,
+        ),
+
+        # ---------------------------------------------------------------
+        # Constant chaining
+        # ---------------------------------------------------------------
+
+        # (x + c1) + c2 -> x + (c1 + c2)
+        (
+            UPat(
+                Ops.ADD,
+                src=(
+                    UPat(
+                        Ops.ADD,
+                        src=(
+                            UPat.var("x"),
+                            UPat.cvar("c1"),
+                        ),
+                    ),
+                    UPat.cvar("c2"),
+                ),
+            ),
+            lambda x, c1, c2: (
+                x + UOp.const(
+                    x.dtype,
+                    c1.arg + c2.arg,
+                )
+            ),
+        ),
+
+        # (x * c1) * c2 -> x * (c1 * c2)
+        (
+            UPat(
+                Ops.MUL,
+                src=(
+                    UPat(
+                        Ops.MUL,
+                        src=(
+                            UPat.var("x"),
+                            UPat.cvar("c1"),
+                        ),
+                    ),
+                    UPat.cvar("c2"),
+                ),
+            ),
+            lambda x, c1, c2: (
+                x * UOp.const(
+                    x.dtype,
+                    c1.arg * c2.arg,
+                )
+            ),
+        ),
+
+        # ---------------------------------------------------------------
+        # Sum canonicalization: constants drift to the end
+        # ---------------------------------------------------------------
+
+        # (x + c) + y -> (x + y) + c
+        # Only apply when y is not already a constant.
+        (
+            UPat(
+                Ops.ADD,
+                src=(
+                    UPat(
+                        Ops.ADD,
+                        src=(
+                            UPat.var("x"),
+                            UPat.cvar("c"),
+                        ),
+                    ),
+                    UPat.var("y"),
+                ),
+            ),
+            lambda x, c, y: (
+                None
+                if y.op is Ops.CONST
+                else (x + y) + c
+            ),
+        ),
+
+        # x + (y + c) -> (x + y) + c
+        (
+            UPat(
+                Ops.ADD,
+                src=(
+                    UPat.var("x"),
+                    UPat(
+                        Ops.ADD,
+                        src=(
+                            UPat.var("y"),
+                            UPat.cvar("c"),
+                        ),
+                    ),
+                ),
+            ),
+            lambda x, y, c: (x + y) + c,
+        ),
+
+        # ---------------------------------------------------------------
+        # Integer distribution
+        # ---------------------------------------------------------------
+
+        # (a + b) * c -> a * c + b * c
+        # This rule is restricted to int32 as required.
+        (
+            UPat(
+                Ops.MUL,
+                dtype=dtypes.int32,
+                src=(
+                    UPat(
+                        Ops.ADD,
+                        src=(
+                            UPat.var("a"),
+                            UPat.var("b"),
+                        ),
+                    ),
+                    UPat.cvar("c"),
+                ),
+            ),
+            lambda a, b, c: a * c + b * c,
+        ),
+    ])
+

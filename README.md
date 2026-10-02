@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** bounds
 - [x] **3.** UPat
 - [x] **4.** graph_rewrite
+- [x] **5.** exec_alu
 
 ---
 
