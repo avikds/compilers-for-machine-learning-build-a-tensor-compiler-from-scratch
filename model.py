@@ -267,7 +267,6 @@ class UOp:
 # Step 2 - bounds
 import functools
 
-
 @functools.lru_cache(maxsize=None)
 def bounds(u):
     """
