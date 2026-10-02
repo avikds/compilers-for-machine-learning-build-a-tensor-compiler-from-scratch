@@ -4497,58 +4497,75 @@ def cuda_source(k, block=(32, 4, 1)):
     return render_cuda(k) + launcher
 
 # Step 29 - grad_alu
+# ── Step 029  grad_alu ──
 def grad_alu(u, g):
     T = Tensor
-    gu = g
     out = T(u)
 
+    def zeros_like(t):
+        shape = t.shape
+
+        if not shape:
+            return T.const(0.0, t.dtype)
+
+        return T.const(
+            0.0,
+            t.dtype,
+        ).reshape(
+            (1,) * len(shape)
+        ).expand(shape)
+
+    zero = zeros_like(g)
+
     if u.op is Ops.ADD:
-        a, b = (T(src) for src in u.src)
         return [
-            (u.src[0], gu),
-            (u.src[1], gu),
+            (u.src[0], g),
+            (u.src[1], g),
         ]
 
     if u.op is Ops.MUL:
-        a, b = (T(src) for src in u.src)
+        a, b = T(u.src[0]), T(u.src[1])
+
         return [
-            (u.src[0], gu * b),
-            (u.src[1], gu * a),
+            (u.src[0], g * b),
+            (u.src[1], g * a),
         ]
 
     if u.op is Ops.MAX:
-        a, b = (T(src) for src in u.src)
+        a, b = T(u.src[0]), T(u.src[1])
         cond = b < a
-        zero = T.const(0.0).reshape(1).expand(gu.shape)
+
         return [
-            (u.src[0], cond.where(gu, zero)),
-            (u.src[1], cond.where(zero, gu)),
+            (u.src[0], cond.where(g, zero)),
+            (u.src[1], cond.where(zero, g)),
         ]
 
     if u.op is Ops.RECIP:
         return [
             (
                 u.src[0],
-                -(gu * out * out),
+                -(g * out * out),
             )
         ]
 
     if u.op is Ops.EXP2:
         ln2 = T.const(math.log(2.0))
+
         return [
             (
                 u.src[0],
-                gu * out * ln2,
+                g * out * ln2,
             )
         ]
 
     if u.op is Ops.LOG2:
         x = T(u.src[0])
         ln2 = T.const(math.log(2.0))
+
         return [
             (
                 u.src[0],
-                gu * (x * ln2).recip(),
+                g * (x * ln2).recip(),
             )
         ]
 
@@ -4556,23 +4573,23 @@ def grad_alu(u, g):
         return [
             (
                 u.src[0],
-                gu * (out * 2.0).recip(),
+                g * (out * 2.0).recip(),
             )
         ]
 
     if u.op is Ops.WHERE:
-        c, a, b = (T(src) for src in u.src)
-        zero = T.const(0.0).reshape(1).expand(gu.shape)
+        c = T(u.src[0])
+
         return [
-            (u.src[1], c.where(gu, zero)),
-            (u.src[2], c.where(zero, gu)),
+            (u.src[1], c.where(g, zero)),
+            (u.src[2], c.where(zero, g)),
         ]
 
     if u.op is Ops.CAST:
         return [
             (
                 u.src[0],
-                gu.cast(u.src[0].dtype),
+                g.cast(u.src[0].dtype),
             )
         ]
 
@@ -4582,6 +4599,52 @@ def grad_alu(u, g):
     raise NotImplementedError(
         f"no ALU gradient rule for {u.op}"
     )
+
+
+# ── Step 031  backward ──
+def backward(loss, params):
+    grads = {
+        loss.uop: Tensor.const(1.0),
+    }
+
+    for u in reversed(loss.uop.toposort()):
+        g = grads.get(u)
+
+        if g is None:
+            continue
+
+        if u.op in (
+            Ops.CONST,
+            Ops.BUFFER,
+            Ops.CMPLT,
+            Ops.AND,
+            Ops.IDIV,
+            Ops.MOD,
+        ):
+            continue
+
+        if u.op in ALU:
+            contributions = grad_alu(u, g)
+
+        elif u.op in MOVEMENT or u.op is Ops.REDUCE_AXIS:
+            contributions = grad_movement(u, g)
+
+        else:
+            continue
+
+        for src, gt in contributions:
+            if gt.shape != shape_of(src):
+                gt = gt.expand(shape_of(src))
+
+            if src in grads:
+                grads[src] = grads[src] + gt
+            else:
+                grads[src] = gt
+
+    return {
+        p: grads.get(p.uop)
+        for p in params
+    }
 
 # Step 30 - grad_movement
 def grad_movement(u, g):
@@ -4714,4 +4777,53 @@ def grad_movement(u, g):
     raise NotImplementedError(
         f"no movement gradient rule for {u.op}"
     )
+
+# Step 31 - backward
+def backward(loss, params):
+    grads = {
+        loss.uop: Tensor.const(1.0),
+    }
+
+    nodes = loss.uop.toposort()
+
+    for u in reversed(nodes):
+        g = grads.get(u)
+
+        if g is None:
+            continue
+
+        if u.op in (
+            Ops.CONST,
+            Ops.BUFFER,
+            Ops.CMPLT,
+            Ops.AND,
+            Ops.IDIV,
+            Ops.MOD,
+        ):
+            continue
+
+        if u.op in ALU:
+            contributions = grad_alu(u, g)
+
+        elif u.op in MOVEMENT or u.op is Ops.REDUCE_AXIS:
+            contributions = grad_movement(u, g)
+
+        else:
+            continue
+
+        for src, gt in contributions:
+            src_shape = shape_of(src)
+
+            if gt.shape != src_shape:
+                gt = gt.expand(src_shape)
+
+            if src in grads:
+                grads[src] = grads[src] + gt
+            else:
+                grads[src] = gt
+
+    return {
+        p: grads.get(p.uop)
+        for p in params
+    }
 
