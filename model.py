@@ -4583,3 +4583,135 @@ def grad_alu(u, g):
         f"no ALU gradient rule for {u.op}"
     )
 
+# Step 30 - grad_movement
+def grad_movement(u, g):
+    T = Tensor
+    src = T(u.src[0])
+    src_shape = src.shape
+
+    if u.op is Ops.RESHAPE:
+        return [
+            (
+                u.src[0],
+                g.reshape(src_shape),
+            )
+        ]
+
+    if u.op is Ops.EXPAND:
+        axes = tuple(
+            i
+            for i, (s, d) in enumerate(
+                zip(src_shape, g.shape)
+            )
+            if s == 1 and d != 1
+        )
+
+        if axes:
+            g = g.sum(
+                axes,
+                keepdim=True,
+            )
+
+        return [
+            (
+                u.src[0],
+                g,
+            )
+        ]
+
+    if u.op is Ops.PERMUTE:
+        inv = [0] * len(u.arg)
+
+        for i, axis in enumerate(u.arg):
+            inv[axis] = i
+
+        return [
+            (
+                u.src[0],
+                g.permute(tuple(inv)),
+            )
+        ]
+
+    if u.op is Ops.FLIP:
+        return [
+            (
+                u.src[0],
+                g.flip(u.arg),
+            )
+        ]
+
+    if u.op is Ops.PAD:
+        bounds = tuple(
+            (
+                lo,
+                lo + size,
+            )
+            for (lo, _), size in zip(
+                u.arg,
+                src_shape,
+            )
+        )
+
+        return [
+            (
+                u.src[0],
+                g.shrink(bounds),
+            )
+        ]
+
+    if u.op is Ops.SHRINK:
+        padding = tuple(
+            (
+                begin,
+                size - end,
+            )
+            for (begin, end), size in zip(
+                u.arg,
+                src_shape,
+            )
+        )
+
+        return [
+            (
+                u.src[0],
+                g.pad(padding),
+            )
+        ]
+
+    if u.op is Ops.REDUCE_AXIS:
+        op, axes = u.arg
+        expanded = g.expand(src_shape)
+
+        if op is Ops.ADD:
+            return [
+                (
+                    u.src[0],
+                    expanded,
+                )
+            ]
+
+        if op is Ops.MAX:
+            max_value = T(u).expand(src_shape)
+
+            mask = (
+                src < max_value
+            ).where(
+                T.const(0.0),
+                T.const(1.0),
+            )
+
+            return [
+                (
+                    u.src[0],
+                    expanded * mask,
+                )
+            ]
+
+        raise NotImplementedError(
+            f"no reduction gradient rule for {op}"
+        )
+
+    raise NotImplementedError(
+        f"no movement gradient rule for {u.op}"
+    )
+
