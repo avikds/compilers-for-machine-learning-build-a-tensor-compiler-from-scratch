@@ -3739,3 +3739,148 @@ def run_program_np(prog, inputs):
         if kind == "output"
     }
 
+# Step 22 - split_range
+def substitute(u, mapping):
+    memo = {}
+
+    def sub(node):
+        if node in mapping:
+            return mapping[node]
+
+        if node in memo:
+            return memo[node]
+
+        src = tuple(sub(s) for s in node.src)
+
+        if src == node.src:
+            out = node
+        else:
+            out = UOp(
+                node.op,
+                node.dtype,
+                src,
+                node.arg,
+            )
+
+        memo[node] = out
+        return out
+
+    return sub(u)
+
+
+def next_id(k):
+    largest = -1
+
+    # Check every expression for RANGE and DEFINE_ACC nodes.
+    for expr in k.all_exprs():
+        for u in expr.toposort():
+            if u.op in {Ops.RANGE, Ops.DEFINE_ACC}:
+                largest = max(largest, u.arg)
+
+    # Also check output ranges and every reduction's range list.
+    def check_reduce(r):
+        nonlocal largest
+
+        for rg in r.ranges:
+            if rg.op is Ops.RANGE:
+                largest = max(largest, rg.arg)
+
+        for acc, init, update in r.accs:
+            if acc.op is Ops.DEFINE_ACC:
+                largest = max(largest, acc.arg)
+
+            for expr in (init, update):
+                for u in expr.toposort():
+                    if u.op in {Ops.RANGE, Ops.DEFINE_ACC}:
+                        largest = max(largest, u.arg)
+
+        for stmt in r.body:
+            check_reduce(stmt)
+
+    for r in k.body:
+        check_reduce(r)
+
+    for r in k.out_ranges:
+        if r.op is Ops.RANGE:
+            largest = max(largest, r.arg)
+
+    return largest + 1
+
+
+def split_range(k, rng, size):
+    # The original range is [0, n).
+    assert rng.op is Ops.RANGE
+
+    n = rng.src[0].arg
+    assert n % size == 0
+
+    base = next_id(k)
+
+    outer = UOp.range(
+        n // size,
+        base,
+    )
+
+    inner = UOp.range(
+        size,
+        base + 1,
+    )
+
+    # Replace the old loop variable inside every expression.
+    replacement = outer * size + inner
+    mapping = {rng: replacement}
+
+    nk = k.map_exprs(
+        lambda u: substitute(u, mapping)
+    )
+
+    # Replace the old range in the output loop list.
+    out_ranges = []
+    for r in nk.out_ranges:
+        if r is rng:
+            out_ranges.extend((outer, inner))
+        else:
+            out_ranges.append(r)
+
+    nk.out_ranges = out_ranges
+
+    # Replace the old range in every reduction's loop list.
+    def replace_reduce(r):
+        r.ranges = tuple(
+            outer if x is rng else x
+            for x in r.ranges
+        )
+
+        # A range in the loop list expands to two nested loops.
+        ranges = []
+        for x in r.ranges:
+            if x is outer:
+                ranges.extend((outer, inner))
+            else:
+                ranges.append(x)
+
+        r.ranges = tuple(ranges)
+
+        for stmt in r.body:
+            replace_reduce(stmt)
+
+    # Rebuild the reduction lists carefully so the original range
+    # becomes outer, inner rather than appearing only once.
+    def fix_reduce(r):
+        ranges = []
+        for x in r.ranges:
+            if x is rng:
+                ranges.extend((outer, inner))
+            else:
+                ranges.append(x)
+
+        r.ranges = tuple(ranges)
+
+        for stmt in r.body:
+            fix_reduce(stmt)
+
+    for r in nk.body:
+        fix_reduce(r)
+
+    return nk, outer, inner
+

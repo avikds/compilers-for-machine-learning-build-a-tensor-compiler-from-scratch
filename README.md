@@ -31,6 +31,7 @@ python scaffold.py
 - [x] **19.** render_kernel
 - [x] **20.** schedule
 - [x] **21.** Compiled
+- [x] **22.** split_range
 
 ---
 
