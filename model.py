@@ -4778,7 +4778,6 @@ def grad_movement(u, g):
     )
 
 # Step 31 - backward
-# ── Step 031  backward ──
 def backward(loss, params):
     grads = {
         loss.uop: Tensor.const(1.0),
