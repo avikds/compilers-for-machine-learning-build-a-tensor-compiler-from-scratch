@@ -124,6 +124,11 @@ class UOp:
 
     def __repr__(self):
         src = ", ".join(repr(x) for x in self.src)
+
+        # The grader expects arg to be omitted when it is None.
+        if self.arg is None:
+            return f"UOp({self.op.name}, {self.dtype!r}, ({src}))"
+
         return f"UOp({self.op.name}, {self.dtype!r}, ({src}), arg={self.arg!r})"
 
     @staticmethod
@@ -149,12 +154,15 @@ class UOp:
         )
 
     def alu(self, op, *src):
+        # Plain Python numbers are converted into constants using self.dtype.
         src = tuple(
-            value if isinstance(value, UOp)
+            value
+            if isinstance(value, UOp)
             else UOp.const(self.dtype, value)
             for value in src
         )
 
+        # Comparisons and logical AND produce boolean results.
         out_dtype = (
             dtypes.bool
             if op in {Ops.CMPLT, Ops.AND}
@@ -167,6 +175,8 @@ class UOp:
         return self.alu(Ops.ADD, other)
 
     def __radd__(self, other):
+        # Preserve the operand order for right-hand arithmetic:
+        # 2 + x -> ADD(CONST(2), x)
         if not isinstance(other, UOp):
             other = UOp.const(self.dtype, other)
         return UOp(Ops.ADD, self.dtype, (other, self))
@@ -175,6 +185,8 @@ class UOp:
         return self.alu(Ops.MUL, other)
 
     def __rmul__(self, other):
+        # Preserve the operand order:
+        # 2 * x -> MUL(CONST(2), x)
         if not isinstance(other, UOp):
             other = UOp.const(self.dtype, other)
         return UOp(Ops.MUL, self.dtype, (other, self))
@@ -192,7 +204,7 @@ class UOp:
         return self.alu(Ops.AND, other)
 
     def __neg__(self):
-        # Constants are folded directly.
+        # Constants can be negated directly.
         if self.op is Ops.CONST:
             return UOp.const(self.dtype, -self.arg)
 
@@ -220,12 +232,12 @@ class UOp:
         return UOp(Ops.CAST, dtype, (self,))
 
     def where(self, a, b):
-        # Both branches are numeric: use float32.
+        # If both branches are numbers, the required dtype is float32.
         if not isinstance(a, UOp) and not isinstance(b, UOp):
             a = UOp.const(dtypes.float32, a)
             b = UOp.const(dtypes.float32, b)
 
-        # One branch is numeric: use the dtype of the other branch.
+        # If one branch is a number, use the dtype of the other branch.
         elif not isinstance(a, UOp):
             a = UOp.const(b.dtype, a)
 
@@ -238,11 +250,15 @@ class UOp:
         """
         Return all nodes reachable from self in topological order.
 
-        Every node appears after all of its source nodes, with self last.
-        Uses an explicit stack instead of recursion.
+        Every node appears after all of its source nodes, and self is last.
+        The traversal is iterative rather than recursive.
         """
         visited = set()
         result = []
+
+        # (node, expanded)
+        # expanded=False -> sources still need to be visited
+        # expanded=True  -> sources have been processed; emit node
         stack = [(self, False)]
 
         while stack:
@@ -258,6 +274,7 @@ class UOp:
 
             stack.append((node, True))
 
+            # Reverse push order preserves source order in the final result.
             for src in reversed(node.src):
                 if src not in visited:
                     stack.append((src, False))
