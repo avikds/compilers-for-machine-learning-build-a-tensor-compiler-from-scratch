@@ -926,297 +926,201 @@ def basic_rules():
     ])
 
 # Step 6 - fold_div
-import sys
-import math
-from enum import Enum, auto
-import numpy as np
+def _terms(u):
+    """
+    Flatten an ADD chain into a list of terms.
 
-sys.setrecursionlimit(100000)
-INF = float("inf")
+    The terms are returned in their original left-to-right order.
+    """
+    if u.op is not Ops.ADD:
+        return [u]
 
-
-class DType:
-    def __init__(self, name, c_name, np_type):
-        self.name, self.c_name, self.np = name, c_name, np_type
-
-    def __repr__(self):
-        return "dtypes." + self.name
+    return _terms(u.src[0]) + _terms(u.src[1])
 
 
-class dtypes:
-    bool = DType("bool", "int", np.int32)
-    int32 = DType("int32", "int", np.int32)
-    float32 = DType("float32", "float", np.float32)
+def _factor(t):
+    """
+    Return (base, k) such that t == base * k.
+
+    Cases:
+      CONST c       -> (None, c)
+      x * CONST k   -> (x, k)
+      anything else -> (t, 1)
+    """
+    if t.op is Ops.CONST:
+        return None, t.arg
+
+    if (
+        t.op is Ops.MUL
+        and len(t.src) == 2
+        and t.src[1].op is Ops.CONST
+    ):
+        return t.src[0], t.src[1].arg
+
+    return t, 1
 
 
-class Ops(Enum):
-    CONST = auto()
-    PARAM = auto()
-    BUFFER = auto()
-    ADD = auto()
-    MUL = auto()
-    MAX = auto()
-    CMPLT = auto()
-    AND = auto()
-    IDIV = auto()
-    MOD = auto()
-    RECIP = auto()
-    EXP2 = auto()
-    LOG2 = auto()
-    SQRT = auto()
-    CAST = auto()
-    WHERE = auto()
-    RESHAPE = auto()
-    EXPAND = auto()
-    PERMUTE = auto()
-    FLIP = auto()
-    PAD = auto()
-    SHRINK = auto()
-    REDUCE_AXIS = auto()
-    RANGE = auto()
-    SPECIAL = auto()
-    INDEX = auto()
-    LOAD = auto()
-    STORE = auto()
-    DEFINE_ACC = auto()
-    SINK = auto()
+def _sum(terms, dtype):
+    """
+    Add terms from left to right.
+
+    An empty list gives CONST 0.
+    """
+    if not terms:
+        return UOp.const(dtype, 0)
+
+    result = terms[0]
+    for term in terms[1:]:
+        result = result + term
+
+    return result
 
 
-BINARY = {
-    Ops.ADD,
-    Ops.MUL,
-    Ops.MAX,
-    Ops.CMPLT,
-    Ops.AND,
-    Ops.IDIV,
-    Ops.MOD,
-}
+def fold_div(x, c):
+    """
+    Simplify x // c using symbolic index arithmetic.
 
-UNARY = {
-    Ops.RECIP,
-    Ops.EXP2,
-    Ops.LOG2,
-    Ops.SQRT,
-    Ops.CAST,
-}
+    c must be a positive constant.
+    """
+    if c.op is not Ops.CONST:
+        return None
 
-ALU = BINARY | UNARY | {Ops.WHERE}
+    divisor = c.arg
 
-MOVEMENT = {
-    Ops.RESHAPE,
-    Ops.EXPAND,
-    Ops.PERMUTE,
-    Ops.FLIP,
-    Ops.PAD,
-    Ops.SHRINK,
-}
+    if divisor <= 0:
+        return None
 
+    terms = _terms(x)
 
-class UOp:
-    __slots__ = ("op", "dtype", "src", "arg")
-    _cache = {}
+    divisible = []
+    remainder = []
 
-    def __new__(cls, op, dtype=None, src=(), arg=None):
-        src = tuple(src)
-        key = (op, dtype, src, arg)
+    for term in terms:
+        base, k = _factor(term)
 
-        if key in cls._cache:
-            return cls._cache[key]
+        if k % divisor == 0:
+            q = k // divisor
 
-        self = super().__new__(cls)
-        self.op = op
-        self.dtype = dtype
-        self.src = src
-        self.arg = arg
-
-        cls._cache[key] = self
-        return self
-
-    def __init__(self, op, dtype=None, src=(), arg=None):
-        # Fields are initialized in __new__ because UOps are hash-consed.
-        pass
-
-    def __repr__(self):
-        src = ", ".join(repr(x) for x in self.src)
-
-        if self.arg is None:
-            return f"UOp({self.op.name}, {self.dtype!r}, ({src}))"
-
-        return f"UOp({self.op.name}, {self.dtype!r}, ({src}), arg={self.arg!r})"
-
-    @staticmethod
-    def const(dtype, v):
-        if dtype is dtypes.bool:
-            v = bool(v)
-        elif dtype is dtypes.int32:
-            v = int(v)
-        elif dtype is dtypes.float32:
-            v = float(v)
+            if base is None:
+                # Constant term.
+                divisible.append(UOp.const(x.dtype, q))
+            elif q == 1:
+                # base * 1 -> base
+                divisible.append(base)
+            else:
+                # base * k -> base * (k // divisor)
+                divisible.append(
+                    base * UOp.const(x.dtype, q)
+                )
         else:
-            raise TypeError(f"Unsupported dtype: {dtype!r}")
+            remainder.append(term)
 
-        return UOp(Ops.CONST, dtype, (), v)
+    # If no term is directly divisible and the expression consists of
+    # exactly one y * k term, divide the divisor by k instead:
+    #
+    # (y * k) // c -> y // (c // k)
+    if not divisible and len(terms) == 1:
+        base, k = _factor(terms[0])
 
-    @staticmethod
-    def range(n, i):
-        return UOp(
-            Ops.RANGE,
-            dtypes.int32,
-            (UOp.const(dtypes.int32, n),),
-            i,
-        )
+        if (
+            base is not None
+            and k > 1
+            and divisor % k == 0
+        ):
+            return base // UOp.const(
+                base.dtype,
+                divisor // k,
+            )
 
-    def alu(self, op, *src):
-        src = tuple(
-            value if isinstance(value, UOp)
-            else UOp.const(self.dtype, value)
-            for value in src
-        )
+    # Rebuild the non-divisible remainder.
+    remainder_expr = _sum(remainder, x.dtype)
+    rmin, rmax = bounds(remainder_expr)
 
-        result_dtype = (
-            dtypes.bool
-            if op in {Ops.CMPLT, Ops.AND}
-            else self.dtype
-        )
+    # If the remainder is known to be in [0, divisor), then
+    # remainder // divisor == 0.
+    if 0 <= rmin and rmax < divisor:
+        if divisible:
+            return _sum(divisible, x.dtype)
+        return UOp.const(x.dtype, 0)
 
-        return UOp(
-            op,
-            result_dtype,
-            (self,) + src,
-        )
+    # There are divisible terms, but the remainder still requires
+    # an integer floor division.
+    if divisible:
+        quotient = _sum(divisible, x.dtype)
+        return quotient + (remainder_expr // c)
 
-    def __add__(self, other):
-        return self.alu(Ops.ADD, other)
+    # Nothing can be simplified safely.
+    return None
 
-    def __radd__(self, other):
-        if not isinstance(other, UOp):
-            other = UOp.const(self.dtype, other)
 
-        return UOp(
-            Ops.ADD,
-            self.dtype,
-            (other, self),
-        )
+def fold_mod(x, c):
+    """
+    Simplify x % c by removing terms whose factor is divisible by c.
+    """
+    if c.op is not Ops.CONST:
+        return None
 
-    def __mul__(self, other):
-        return self.alu(Ops.MUL, other)
+    divisor = c.arg
 
-    def __rmul__(self, other):
-        if not isinstance(other, UOp):
-            other = UOp.const(self.dtype, other)
+    if divisor <= 0:
+        return None
 
-        return UOp(
-            Ops.MUL,
-            self.dtype,
-            (other, self),
-        )
+    terms = _terms(x)
 
-    def __floordiv__(self, other):
-        return self.alu(Ops.IDIV, other)
+    remainder = []
+    dropped = False
 
-    def __mod__(self, other):
-        return self.alu(Ops.MOD, other)
+    for term in terms:
+        _, k = _factor(term)
 
-    def __lt__(self, other):
-        return self.alu(Ops.CMPLT, other)
+        if k % divisor == 0:
+            dropped = True
+        else:
+            remainder.append(term)
 
-    def __and__(self, other):
-        return self.alu(Ops.AND, other)
+    remainder_expr = _sum(remainder, x.dtype)
+    rmin, rmax = bounds(remainder_expr)
 
-    def __neg__(self):
-        # Constants are negated directly.
-        if self.op is Ops.CONST:
-            return UOp.const(self.dtype, -self.arg)
+    # If the remainder is already known to be inside [0, divisor),
+    # modulo does nothing.
+    if 0 <= rmin and rmax < divisor:
+        return remainder_expr
 
-        return self * UOp.const(self.dtype, -1)
+    # At least one divisible term was removed, so only the remainder
+    # needs to be reduced modulo divisor.
+    if dropped:
+        return remainder_expr % c
 
-    def __sub__(self, other):
-        return self + (-other)
+    return None
 
-    def maximum(self, other):
-        return self.alu(Ops.MAX, other)
 
-    def recip(self):
-        return UOp(
-            Ops.RECIP,
-            self.dtype,
-            (self,),
-        )
+def fold_cmplt(x, y):
+    """
+    Fold x < y when symbolic bounds make the result certain.
+    """
+    vmin, vmax = bounds(x < y)
 
-    def exp2(self):
-        return UOp(
-            Ops.EXP2,
-            self.dtype,
-            (self,),
-        )
+    if (vmin, vmax) == (1, 1):
+        return UOp.const(dtypes.bool, True)
 
-    def log2(self):
-        return UOp(
-            Ops.LOG2,
-            self.dtype,
-            (self,),
-        )
+    if (vmin, vmax) == (0, 0):
+        return UOp.const(dtypes.bool, False)
 
-    def sqrt(self):
-        return UOp(
-            Ops.SQRT,
-            self.dtype,
-            (self,),
-        )
+    return None
 
-    def cast(self, dtype):
-        return UOp(
-            Ops.CAST,
-            dtype,
-            (self,),
-        )
 
-    def where(self, a, b):
-        # When both branches are plain numbers, use float32.
-        if not isinstance(a, UOp) and not isinstance(b, UOp):
-            a = UOp.const(dtypes.float32, a)
-            b = UOp.const(dtypes.float32, b)
+def fold_max(x, y):
+    """
+    Fold max(x, y) when bounds prove one operand is always larger.
+    """
+    xmin, xmax = bounds(x)
+    ymin, ymax = bounds(y)
 
-        # When one branch is numeric, use the other branch's dtype.
-        elif not isinstance(a, UOp):
-            a = UOp.const(b.dtype, a)
+    if xmin >= ymax:
+        return x
 
-        elif not isinstance(b, UOp):
-            b = UOp.const(a.dtype, b)
+    if ymin >= xmax:
+        return y
 
-        return UOp(
-            Ops.WHERE,
-            a.dtype,
-            (self, a, b),
-        )
-
-    def toposort(self):
-        """
-        Return all nodes reachable from self in topological order.
-
-        Every node appears after all of its sources, and self is last.
-        The traversal is iterative to avoid recursion-depth issues.
-        """
-        visited = set()
-        result = []
-        stack = [(self, False)]
-
-        while stack:
-            u, expanded = stack.pop()
-
-            if u in visited:
-                continue
-
-            if expanded:
-                visited.add(u)
-                result.append(u)
-                continue
-
-            stack.append((u, True))
-
-            for src in reversed(u.src):
-                if src not in visited:
-                    stack.append((src, False))
-
-        return result
+    return None
 
