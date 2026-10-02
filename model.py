@@ -406,7 +406,6 @@ def bounds(u):
 # Step 3 - UPat
 _MISSING = object()
 
-
 class UPat:
     def __init__(self, op=None, dtype=None, src=None, arg=_MISSING, name=None):
         self.op = op
