@@ -24,6 +24,7 @@ python scaffold.py
 - [x] **12.** Tensor
 - [x] **13.** eval_tensor
 - [x] **14.** conv2d
+- [x] **15.** Kernel
 
 ---
 

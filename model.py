@@ -2682,3 +2682,105 @@ def conv2d(x, w, pad=0):
 
 Tensor.conv2d = conv2d
 
+# Step 15 - Kernel
+class Reduce:
+    def __init__(self, ranges, accs, body):
+        self.ranges = tuple(ranges)
+        self.accs = [list(a) for a in accs]
+        self.body = list(body)
+
+    def __repr__(self):
+        return (
+            f"Reduce(ranges={[r.arg for r in self.ranges]}, "
+            f"accs={len(self.accs)}, body={self.body})"
+        )
+
+
+class Kernel:
+    def __init__(self, name, params, out_ranges, body, stores):
+        self.name = name
+        self.params = list(params)
+        self.out_ranges = list(out_ranges)
+        self.body = list(body)
+        self.stores = list(stores)
+
+    def map_exprs(self, f):
+        def map_reduce(r):
+            # Apply f to every accumulator expression and recurse into body.
+            accs = [
+                [acc, f(init), f(update)]
+                for acc, init, update in r.accs
+            ]
+
+            body = [
+                map_reduce(stmt)
+                for stmt in r.body
+            ]
+
+            return Reduce(r.ranges, accs, body)
+
+        body = [
+            map_reduce(r)
+            for r in self.body
+        ]
+
+        stores = [
+            (f(index), f(value))
+            for index, value in self.stores
+        ]
+
+        return Kernel(
+            self.name,
+            self.params,
+            self.out_ranges,
+            body,
+            stores,
+        )
+
+    def all_exprs(self):
+        exprs = []
+
+        def collect_reduce(r):
+            for _, init, update in r.accs:
+                exprs.append(init)
+                exprs.append(update)
+
+            for stmt in r.body:
+                collect_reduce(stmt)
+
+        for r in self.body:
+            collect_reduce(r)
+
+        for index, value in self.stores:
+            exprs.append(index)
+            exprs.append(value)
+
+        return exprs
+
+
+def ranges_in(u):
+    return {
+        node
+        for node in u.toposort()
+        if node.op is Ops.RANGE
+    }
+
+
+def flat_index(idxs, shape):
+    # Build a row-major linear index using the tensor's strides.
+    out = UOp.const(dtypes.int32, 0)
+
+    for i, (idx, size) in enumerate(zip(idxs, shape)):
+        # Size-one axes contribute nothing to the flat index.
+        if size == 1:
+            continue
+
+        stride = math.prod(shape[i + 1:])
+
+        if stride == 1:
+            out = out + idx
+        else:
+            out = out + idx * stride
+
+    return out
+
