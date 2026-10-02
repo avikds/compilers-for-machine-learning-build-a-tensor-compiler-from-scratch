@@ -4172,3 +4172,135 @@ def bench_kernel(k, bufs, reps=3):
 def gflops(n, seconds):
     return 2 * n**3 / seconds / 1e9
 
+# Step 26 - flash_attention_kernel
+# ── Step 026  flash_attention_kernel ──
+def flash_attention_kernel(N, d, name="flash"):
+    out = param("out", dtypes.float32, 0)
+    q = param("q", dtypes.float32, 1)
+    k = param("k", dtypes.float32, 2)
+    v = param("v", dtypes.float32, 3)
+
+    # Output row and key row.
+    i = UOp.range(N, 0)
+    j = UOp.range(N, 1)
+
+    # Nested reduction over the feature dimension.
+    c = UOp.range(d, 2)
+
+    zero = UOp.const(dtypes.float32, 0.0)
+
+    # Score: sum_c q[i, c] * k[j, c].
+    score_acc = UOp(
+        Ops.DEFINE_ACC,
+        dtypes.float32,
+        (),
+        3,
+    )
+
+    score_reduce = Reduce(
+        (c,),
+        [
+            [
+                score_acc,
+                zero,
+                score_acc
+                + load(q, i * d + c) * load(k, j * d + c),
+            ]
+        ],
+        [],
+    )
+
+    # Online softmax accumulators.
+    m = UOp(
+        Ops.DEFINE_ACC,
+        dtypes.float32,
+        (),
+        4,
+    )
+
+    l = UOp(
+        Ops.DEFINE_ACC,
+        dtypes.float32,
+        (),
+        5,
+    )
+
+    m_init = UOp.const(dtypes.float32, -INF)
+
+    scale = UOp.const(
+        dtypes.float32,
+        1.0 / math.sqrt(d),
+    )
+
+    log2e = UOp.const(
+        dtypes.float32,
+        math.log2(math.e),
+    )
+
+    s = score_acc * scale
+    m_new = m.maximum(s)
+
+    alpha = ((m - m_new) * log2e).exp2()
+    p = ((s - m_new) * log2e).exp2()
+
+    accs = [
+        [
+            m,
+            m_init,
+            m_new,
+        ],
+        [
+            l,
+            zero,
+            l * alpha + p,
+        ],
+    ]
+
+    # One output accumulator for each feature column.
+    for col in range(d):
+        acc = UOp(
+            Ops.DEFINE_ACC,
+            dtypes.float32,
+            (),
+            6 + col,
+        )
+
+        vj = load(
+            v,
+            j * d + col,
+        )
+
+        accs.append(
+            [
+                acc,
+                zero,
+                acc * alpha + p * vj,
+            ]
+        )
+
+    outer_reduce = Reduce(
+        (j,),
+        accs,
+        [score_reduce],
+    )
+
+    stores = []
+
+    for col in range(d):
+        acc = accs[2 + col][0]
+
+        stores.append(
+            (
+                i * d + col,
+                acc * l.recip(),
+            )
+        )
+
+    return Kernel(
+        name,
+        [out, q, k, v],
+        [i],
+        [outer_reduce],
+        stores,
+    )
+
