@@ -1615,3 +1615,123 @@ def eval_sink(s, bufs):
 
     return bufs
 
+# Step 10 - compile_c
+import os
+import shutil
+import subprocess
+import tempfile
+import hashlib
+import ctypes
+
+
+_CC = None
+_LIBS = {}
+
+
+def compiler():
+    """
+    Return the available C compiler executable.
+
+    The CC environment variable takes precedence. Otherwise, search for
+    clang, gcc, then cc, in that order.
+    """
+    global _CC
+
+    if _CC is not None:
+        return _CC
+
+    if os.environ.get("CC"):
+        _CC = os.environ["CC"]
+        return _CC
+
+    for cc in ("clang", "gcc", "cc"):
+        if shutil.which(cc) is not None:
+            _CC = cc
+            return _CC
+
+    raise RuntimeError("No C compiler found")
+
+
+def compile_c(src):
+    """
+    Compile C source into a shared library and cache it by source hash.
+    """
+    full_src = C_HEADER + src
+    key = hashlib.sha1(full_src.encode()).hexdigest()
+
+    if key in _LIBS:
+        return _LIBS[key]
+
+    cc = compiler()
+
+    tmpdir = tempfile.mkdtemp()
+    c_path = os.path.join(tmpdir, "kernel.c")
+    so_path = os.path.join(tmpdir, "kernel.so")
+
+    with open(c_path, "w") as f:
+        f.write(full_src)
+
+    cmd = [
+        cc,
+        "-O3",
+        "-march=native",
+        "-shared",
+        "-fPIC",
+        "-w",
+        c_path,
+        "-o",
+        so_path,
+        "-lm",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+
+    lib = ctypes.CDLL(so_path)
+    _LIBS[key] = lib
+
+    return lib
+
+
+def call_kernel(lib, name, bufs):
+    """
+    Call an exported C kernel with raw NumPy buffer pointers.
+    """
+    fn = getattr(lib, name)
+
+    args = [
+        ctypes.c_void_p(buf.ctypes.data)
+        for buf in bufs
+    ]
+
+    fn(*args)
+
+
+def run_sink(s, bufs, name="kernel"):
+    """
+    Render, compile, and execute a SINK graph.
+
+    `bufs` maps parameter names to NumPy arrays. Buffers are passed to the
+    compiled kernel in PARAM position order and are modified in place.
+    """
+    src = render_sink(s, name)
+    lib = compile_c(src)
+
+    ps = params_of(s)
+
+    ordered_bufs = [
+        bufs[p.arg[0]]
+        for p in ps
+    ]
+
+    call_kernel(lib, name, ordered_bufs)
+
+    return bufs
+

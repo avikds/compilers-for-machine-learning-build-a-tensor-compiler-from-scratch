@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** make_symbolic
 - [x] **8.** render_sink
 - [x] **9.** eval_sink
+- [x] **10.** compile_c
 
 ---
 
