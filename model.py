@@ -2784,3 +2784,328 @@ def flat_index(idxs, shape):
 
     return out
 
+# Step 16 - Lowerer
+class Lowerer:
+    def __init__(self, realized):
+        self.realized, self.n = realized, 0
+        self.memo, self.frames = {}, []
+
+    def new_range(self, n):
+        r = UOp.range(n, self.n)
+        self.n += 1
+        return r
+
+    def new_acc(self, dtype):
+        acc = UOp(
+            Ops.DEFINE_ACC,
+            dtype,
+            (),
+            self.n,
+        )
+        self.n += 1
+        return acc
+
+    def lower(self, root):
+        shape = shape_of(root)
+
+        # Create one output index per axis.
+        # Size-one axes use a constant instead of a loop.
+        out_ranges = [
+            UOp.const(dtypes.int32, 0)
+            if size == 1
+            else self.new_range(size)
+            for size in shape
+        ]
+
+        # Keep the output ranges and generated statements in the frame.
+        self.frames.append([set(out_ranges), []])
+
+        val = self.index(
+            root,
+            tuple(out_ranges),
+            root,
+        )
+
+        body = self.frames.pop()[1]
+
+        return Kernel(
+            "k",
+            [],
+            out_ranges,
+            body,
+            [
+                (
+                    flat_index(out_ranges, shape),
+                    val,
+                )
+            ],
+        )
+
+    def index(self, u, idxs, root):
+        key = (u, tuple(idxs))
+
+        if key in self.memo:
+            return self.memo[key]
+
+        shape = shape_of(u)
+
+        # Buffers and realized nodes are materialized as parameters.
+        if u.op is Ops.BUFFER or (
+            u in self.realized and u is not root
+        ):
+            p = self.realized[u]
+
+            out = load(
+                p,
+                flat_index(idxs, shape),
+            )
+
+            self.memo[key] = out
+            return out
+
+        # Constants are already kernel expressions.
+        if u.op is Ops.CONST:
+            self.memo[key] = u
+            return u
+
+        # REDUCE_AXIS is lowered in Step 17.
+        if u.op is Ops.REDUCE_AXIS:
+            raise NotImplementedError("REDUCE_AXIS")
+
+        # Elementwise operations use the same logical indices for
+        # every source because Tensor broadcasting is explicit.
+        if u.op in ALU:
+            out = UOp(
+                u.op,
+                u.dtype,
+                tuple(
+                    self.index(src, idxs, root)
+                    for src in u.src
+                ),
+                u.arg,
+            )
+
+            self.memo[key] = out
+            return out
+
+        if u.op is Ops.RESHAPE:
+            src = u.src[0]
+
+            # Flatten the output coordinates.
+            f = flat_index(
+                idxs,
+                shape,
+            )
+
+            # A buffer or realized tensor is contiguous, so its
+            # flattened element can be loaded directly.
+            if src.op is Ops.BUFFER or (
+                src in self.realized and src is not root
+            ):
+                p = self.realized[src]
+                out = load(p, f)
+
+            else:
+                src_shape = shape_of(src)
+                strides = strides_of(src_shape)
+                src_idxs = []
+
+                # Unflatten the offset using source strides.
+                for stride, size in zip(
+                    strides,
+                    src_shape,
+                ):
+                    if size == 1:
+                        src_idxs.append(
+                            UOp.const(dtypes.int32, 0)
+                        )
+                    else:
+                        src_idxs.append(
+                            (f // stride) % size
+                        )
+
+                out = self.index(
+                    src,
+                    tuple(src_idxs),
+                    root,
+                )
+
+            self.memo[key] = out
+            return out
+
+        if u.op is Ops.EXPAND:
+            src = u.src[0]
+            src_shape = shape_of(src)
+
+            # Expanded size-one axes always read source index zero.
+            src_idxs = tuple(
+                UOp.const(dtypes.int32, 0)
+                if size == 1
+                else idx
+                for size, idx in zip(
+                    src_shape,
+                    idxs,
+                )
+            )
+
+            out = self.index(
+                src,
+                src_idxs,
+                root,
+            )
+
+            self.memo[key] = out
+            return out
+
+        if u.op is Ops.PERMUTE:
+            src = u.src[0]
+
+            # perm[k] is the source axis corresponding to output axis k.
+            src_idxs = [None] * len(u.arg)
+
+            for k, axis in enumerate(u.arg):
+                src_idxs[axis] = idxs[k]
+
+            out = self.index(
+                src,
+                tuple(src_idxs),
+                root,
+            )
+
+            self.memo[key] = out
+            return out
+
+        if u.op is Ops.FLIP:
+            src = u.src[0]
+            src_shape = shape_of(src)
+            axes = set(u.arg)
+
+            # Flip an axis with (size - 1) - index.
+            src_idxs = tuple(
+                UOp.const(
+                    dtypes.int32,
+                    size - 1,
+                ) - idx
+                if axis in axes
+                else idx
+                for axis, (size, idx)
+                in enumerate(zip(src_shape, idxs))
+            )
+
+            out = self.index(
+                src,
+                src_idxs,
+                root,
+            )
+
+            self.memo[key] = out
+            return out
+
+        if u.op is Ops.SHRINK:
+            src = u.src[0]
+
+            # Add the slice beginning offset.
+            src_idxs = tuple(
+                idx + begin
+                for idx, (begin, _)
+                in zip(idxs, u.arg)
+            )
+
+            out = self.index(
+                src,
+                src_idxs,
+                root,
+            )
+
+            self.memo[key] = out
+            return out
+
+        if u.op is Ops.PAD:
+            src = u.src[0]
+            src_shape = shape_of(src)
+
+            # Translate padded indices back to source coordinates.
+            src_idxs = tuple(
+                idx - lo
+                for idx, (lo, _)
+                in zip(idxs, u.arg)
+            )
+
+            # Construct the validity condition for the source region.
+            valid = UOp.const(
+                dtypes.bool,
+                True,
+            )
+
+            for idx, (lo, hi), size in zip(
+                idxs,
+                u.arg,
+                src_shape,
+            ):
+                if lo > 0:
+                    valid = valid & (
+                        UOp.const(
+                            dtypes.int32,
+                            lo - 1,
+                        ) < idx
+                    )
+
+                if hi > 0:
+                    valid = valid & (
+                        idx < UOp.const(
+                            dtypes.int32,
+                            lo + size,
+                        )
+                    )
+
+            inner = self.index(
+                src,
+                src_idxs,
+                root,
+            )
+
+            # Outside the source, padding contributes zero.
+            out = valid.where(
+                inner,
+                UOp.const(
+                    u.dtype,
+                    0,
+                ),
+            )
+
+            self.memo[key] = out
+            return out
+
+        raise NotImplementedError(u.op)
+
+
+def lower_kernel(root, inputs, name="k"):
+    # The output is always parameter position 0.
+    out = param(
+        "out",
+        root.dtype,
+        0,
+    )
+
+    realized = {}
+    params = [out]
+
+    # Add input parameters in the supplied order.
+    for i, (u, buf_name) in enumerate(inputs.items()):
+        p = param(
+            buf_name,
+            u.dtype,
+            i + 1,
+        )
+        realized[u] = p
+        params.append(p)
+
+    lowerer = Lowerer(realized)
+    kernel = lowerer.lower(root)
+
+    kernel.name = name
+    kernel.params = params
+
+    # Simplify all generated expressions.
+    return kernel.map_exprs(simplify)
+
