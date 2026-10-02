@@ -38,6 +38,7 @@ python scaffold.py
 - [x] **26.** flash_attention_kernel
 - [x] **27.** to_gpu
 - [x] **28.** render_cuda
+- [x] **29.** grad_alu
 
 ---
 

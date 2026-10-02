@@ -4496,3 +4496,90 @@ def cuda_source(k, block=(32, 4, 1)):
 
     return render_cuda(k) + launcher
 
+# Step 29 - grad_alu
+def grad_alu(u, g):
+    T = Tensor
+    gu = g
+    out = T(u)
+
+    if u.op is Ops.ADD:
+        a, b = (T(src) for src in u.src)
+        return [
+            (u.src[0], gu),
+            (u.src[1], gu),
+        ]
+
+    if u.op is Ops.MUL:
+        a, b = (T(src) for src in u.src)
+        return [
+            (u.src[0], gu * b),
+            (u.src[1], gu * a),
+        ]
+
+    if u.op is Ops.MAX:
+        a, b = (T(src) for src in u.src)
+        cond = b < a
+        zero = T.const(0.0).reshape(1).expand(gu.shape)
+        return [
+            (u.src[0], cond.where(gu, zero)),
+            (u.src[1], cond.where(zero, gu)),
+        ]
+
+    if u.op is Ops.RECIP:
+        return [
+            (
+                u.src[0],
+                -(gu * out * out),
+            )
+        ]
+
+    if u.op is Ops.EXP2:
+        ln2 = T.const(math.log(2.0))
+        return [
+            (
+                u.src[0],
+                gu * out * ln2,
+            )
+        ]
+
+    if u.op is Ops.LOG2:
+        x = T(u.src[0])
+        ln2 = T.const(math.log(2.0))
+        return [
+            (
+                u.src[0],
+                gu * (x * ln2).recip(),
+            )
+        ]
+
+    if u.op is Ops.SQRT:
+        return [
+            (
+                u.src[0],
+                gu * (out * 2.0).recip(),
+            )
+        ]
+
+    if u.op is Ops.WHERE:
+        c, a, b = (T(src) for src in u.src)
+        zero = T.const(0.0).reshape(1).expand(gu.shape)
+        return [
+            (u.src[1], c.where(gu, zero)),
+            (u.src[2], c.where(zero, gu)),
+        ]
+
+    if u.op is Ops.CAST:
+        return [
+            (
+                u.src[0],
+                gu.cast(u.src[0].dtype),
+            )
+        ]
+
+    if u.op in (Ops.CMPLT, Ops.AND):
+        return []
+
+    raise NotImplementedError(
+        f"no ALU gradient rule for {u.op}"
+    )
+
