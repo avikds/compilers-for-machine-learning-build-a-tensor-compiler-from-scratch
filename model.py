@@ -1735,3 +1735,95 @@ def run_sink(s, bufs, name="kernel"):
 
     return bufs
 
+# Step 11 - shape_of
+def buffer(name, shape, dtype=dtypes.float32):
+    return UOp(
+        Ops.BUFFER,
+        dtype,
+        (),
+        (name, tuple(int(x) for x in shape)),
+    )
+
+
+def strides_of(shape):
+    """
+    Return row-major strides for the given shape.
+
+    Example:
+        (2, 3, 4) -> (12, 4, 1)
+    """
+    shape = tuple(shape)
+
+    strides = [1] * len(shape)
+
+    for i in range(len(shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * shape[i + 1]
+
+    return tuple(strides)
+
+
+@functools.lru_cache(maxsize=None)
+def shape_of(u):
+    """
+    Infer the tensor shape represented by a UOp.
+    """
+    # A buffer carries its shape directly in arg.
+    if u.op is Ops.BUFFER:
+        return u.arg[1]
+
+    # Scalar constants have no tensor dimensions.
+    if u.op is Ops.CONST:
+        return ()
+
+    # RESHAPE and EXPAND explicitly carry their resulting shape.
+    if u.op in (Ops.RESHAPE, Ops.EXPAND):
+        return tuple(u.arg)
+
+    # PERMUTE reorders the dimensions of the source tensor.
+    if u.op is Ops.PERMUTE:
+        src_shape = shape_of(u.src[0])
+        return tuple(src_shape[i] for i in u.arg)
+
+    # FLIP does not change shape.
+    if u.op is Ops.FLIP:
+        return shape_of(u.src[0])
+
+    # PAD increases each dimension by lo + hi.
+    if u.op is Ops.PAD:
+        src_shape = shape_of(u.src[0])
+        return tuple(
+            size + lo + hi
+            for size, (lo, hi) in zip(src_shape, u.arg)
+        )
+
+    # SHRINK changes each dimension from [b, e) to e - b.
+    if u.op is Ops.SHRINK:
+        return tuple(
+            e - b
+            for b, e in u.arg
+        )
+
+    # REDUCE_AXIS keeps reduced dimensions as size 1.
+    if u.op is Ops.REDUCE_AXIS:
+        src_shape = shape_of(u.src[0])
+        _, axes = u.arg
+
+        axes = set(axes)
+
+        return tuple(
+            1 if i in axes else size
+            for i, size in enumerate(src_shape)
+        )
+
+    # Elementwise ALU operations keep the shape of their first tensor
+    # operand. WHERE uses its second source for the data shape.
+    if u.op is Ops.WHERE:
+        return shape_of(u.src[1])
+
+    if u.op in ALU:
+        return shape_of(u.src[0])
+
+    raise NotImplementedError(
+        f"Cannot infer shape for UOp: {u.op}"
+    )
+
