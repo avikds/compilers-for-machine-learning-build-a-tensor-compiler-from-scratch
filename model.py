@@ -4173,7 +4173,6 @@ def gflops(n, seconds):
     return 2 * n**3 / seconds / 1e9
 
 # Step 26 - flash_attention_kernel
-# ── Step 026  flash_attention_kernel ──
 def flash_attention_kernel(N, d, name="flash"):
     out = param("out", dtypes.float32, 0)
     q = param("q", dtypes.float32, 1)
