@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** graph_rewrite
 - [x] **5.** exec_alu
 - [x] **6.** fold_div
+- [x] **7.** make_symbolic
 
 ---
 

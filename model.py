@@ -1124,3 +1124,68 @@ def fold_max(x, y):
 
     return None
 
+# Step 7 - make_symbolic
+def make_symbolic():
+    return (
+        basic_rules()
+        + PatternMatcher([
+            # Symbolic floor division:
+            # x // constant -> fold_div(x, constant)
+            (
+                UPat(
+                    Ops.IDIV,
+                    src=(
+                        UPat.var("x", dtype=dtypes.int32),
+                        UPat.cvar("c"),
+                    ),
+                ),
+                lambda x, c: fold_div(x, c),
+            ),
+
+            # Symbolic modulo:
+            # x % constant -> fold_mod(x, constant)
+            (
+                UPat(
+                    Ops.MOD,
+                    src=(
+                        UPat.var("x", dtype=dtypes.int32),
+                        UPat.cvar("c"),
+                    ),
+                ),
+                lambda x, c: fold_mod(x, c),
+            ),
+
+            # Fold comparisons when bounds prove the result.
+            # Only comparisons whose left operand is int32 are handled.
+            (
+                UPat(
+                    Ops.CMPLT,
+                    src=(
+                        UPat.var("x", dtype=dtypes.int32),
+                        UPat.var("y"),
+                    ),
+                ),
+                lambda x, y: fold_cmplt(x, y),
+            ),
+
+            # Fold max when the left operand is int32.
+            (
+                UPat(
+                    Ops.MAX,
+                    src=(
+                        UPat.var("x", dtype=dtypes.int32),
+                        UPat.var("y"),
+                    ),
+                ),
+                lambda x, y: fold_max(x, y),
+            ),
+        ])
+    )
+
+
+symbolic = make_symbolic()
+
+
+def simplify(u):
+    return graph_rewrite(u, symbolic)
+
